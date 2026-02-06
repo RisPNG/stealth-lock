@@ -24,6 +24,10 @@ import Cogl from 'gi://Cogl';
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 import { Extension } from 'resource:///org/gnome/shell/extensions/extension.js';
 
+// Cairo hand-written bindings for custom JS snippets (optional).
+let _cairo = null;
+try { _cairo = imports.cairo; } catch (e) { /* cairo not available */ }
+
 const MPRIS_PREFIX = 'org.mpris.MediaPlayer2.';
 const MPRIS_PATH = '/org/mpris/MediaPlayer2';
 const MPRIS_PLAYER_INTERFACE = 'org.mpris.MediaPlayer2.Player';
@@ -1763,6 +1767,7 @@ export default class StealthLockExtension extends Extension {
             revealButton,
             revealed: this._passwordPromptRevealed,
             settings: this._settings,
+            gi: { St, Clutter, GLib, GObject, cairo: _cairo },
         });
     }
 
@@ -1812,6 +1817,7 @@ export default class StealthLockExtension extends Extension {
             masked,
             revealed: this._passwordPromptRevealed,
             settings: this._settings,
+            gi: { St, Clutter, GLib, GObject, cairo: _cairo },
         });
 
         // Re-clamp/re-anchor if size changed (e.g. more bullets).
