@@ -1,0 +1,9 @@
+{
+    "name": "Stealth Lock",
+    "description": "Invisible screen freeze with custom hotkey. Freezes display, pauses media, shows lock cursor. Unlock by typing password and pressing Enter.",
+    "uuid": "stealth-lock@user",
+    "shell-version": ["45", "46", "47", "48"],
+    "version": 8,
+    "url": "",
+    "settings-schema": "org.gnome.shell.extensions.stealth-lock"
+}

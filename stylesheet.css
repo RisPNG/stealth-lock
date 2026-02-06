@@ -1,0 +1,13 @@
+/* Stealth Lock Extension Stylesheet */
+
+#stealthLockOverlay {
+    /* Fully transparent background - we use screenshot widgets */
+    background-color: transparent;
+}
+
+/* The overlay should cover everything */
+#stealthLockOverlay StWidget {
+    background-size: cover;
+    background-position: center;
+    background-repeat: no-repeat;
+}

@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<schemalist>
+  <schema id="org.gnome.shell.extensions.stealth-lock" path="/org/gnome/shell/extensions/stealth-lock/">
+    
+    <key name="lock-hotkey" type="as">
+      <default><![CDATA[['<Super><Control>l']]]></default>
+      <summary>Lock Hotkey</summary>
+      <description>
+        The keyboard shortcut to activate the stealth lock.
+        Default is Super+Control+L.
+      </description>
+    </key>
+
+    <key name="debug-mode" type="b">
+      <default>false</default>
+      <summary>Debug Mode</summary>
+      <description>
+        Enables debugging features such as additional logging and an emergency abort hotkey.
+        When enabled, the abort hotkey will unlock without a password.
+      </description>
+    </key>
+
+    <key name="debug-abort-hotkey" type="as">
+      <default><![CDATA[['<Control><Alt><Shift>u']]]></default>
+      <summary>Debug Abort Hotkey</summary>
+      <description>
+        Keyboard shortcut to abort the lock when Debug Mode is enabled.
+        This unlocks without a password and should only be used for debugging.
+      </description>
+    </key>
+    
+  </schema>
+</schemalist>
