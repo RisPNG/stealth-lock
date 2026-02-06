@@ -79,7 +79,7 @@ const CLOCK_MANUAL_MONITOR_INDEX = 0;
 if (ctx.event === 'init') {
   if (ctx.prompt._maze) return;
 
-  const { St, GLib, cairo: Cairo } = ctx.gi;
+  const { St, GLib, cairo: Cairo, Clutter, Pango } = ctx.gi;
   if (!Cairo) return;
 
   const overlay = ctx.prompt.get_parent();
@@ -534,16 +534,32 @@ if (ctx.event === 'init') {
   let tLbl = null;
   let dLbl = null;
 
+  function centerLabel(label) {
+    if (!label) return;
+    try { label.set_x_align(Clutter.ActorAlign.CENTER); } catch (e) {}
+    try { label.set_x_expand(true); } catch (e) {}
+
+    try {
+      const text = label.clutter_text
+        || (typeof label.get_clutter_text === 'function' ? label.get_clutter_text() : null);
+      if (text && typeof text.set_line_alignment === 'function' && Pango && Pango.Alignment)
+        text.set_line_alignment(Pango.Alignment.CENTER);
+    } catch (e) {}
+  }
+
   if (SHOW_CLOCK) {
     tLbl = new St.Label({ text: '' });
-    tLbl.style = CLOCK_TIME_STYLE;
+    tLbl.style = CLOCK_TIME_STYLE + ' text-align: center;';
+    centerLabel(tLbl);
 
     clock = new St.BoxLayout({ vertical: true });
+    try { clock.set_x_align(Clutter.ActorAlign.CENTER); } catch (e) {}
     clock.add_child(tLbl);
 
     if (CLOCK_SHOW_DATE) {
       dLbl = new St.Label({ text: '' });
-      dLbl.style = CLOCK_DATE_STYLE;
+      dLbl.style = CLOCK_DATE_STYLE + ' text-align: center;';
+      centerLabel(dLbl);
       clock.add_child(dLbl);
     }
 
@@ -637,10 +653,20 @@ if (ctx.event === 'init') {
     const target = getClockTargetRect();
     const overlayW = overlay.width || w;
     const overlayH = overlay.height || h;
-    const [, prefClockW] = clock.get_preferred_width(-1);
-    const [, prefClockH] = clock.get_preferred_height(-1);
-    const clockW = prefClockW || 300;
-    const clockH = prefClockH || 80;
+    const [, prefTimeW] = tLbl.get_preferred_width(-1);
+    const [, prefTimeH] = tLbl.get_preferred_height(-1);
+    let prefDateW = 0;
+    let prefDateH = 0;
+    if (dLbl) {
+      [, prefDateW] = dLbl.get_preferred_width(-1);
+      [, prefDateH] = dLbl.get_preferred_height(-1);
+    }
+
+    const clockW = Math.max(prefTimeW || 0, prefDateW || 0, 300);
+    clock.set_width(clockW);
+    const [, prefClockH] = clock.get_preferred_height(clockW);
+    const clockH = Math.max(prefClockH || 0, prefTimeH || 0, prefDateH || 0, 80);
+    clock.set_size(clockW, clockH);
 
     let x;
     if (CLOCK_HORIZONTAL_ALIGN === 'left') {
