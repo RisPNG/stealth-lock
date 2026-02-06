@@ -206,6 +206,223 @@ export default class StealthLockPreferences extends ExtensionPreferences {
             autoResetRow.value = settings.get_uint('auto-reset-seconds');
         });
 
+        // Password prompt / lock type
+        const passwordGroup = new Adw.PreferencesGroup({
+            title: _('Password Prompt'),
+            description: _('Control how password entry is shown while locked'),
+        });
+        page.add(passwordGroup);
+
+        const lockTypeModel = Gtk.StringList.new([_('Stealth'), _('Normal')]);
+        const lockTypeRow = new Adw.ComboRow({
+            title: _('Lock Type'),
+            subtitle: _('Stealth hides the prompt; Normal shows an on-screen prompt'),
+            model: lockTypeModel,
+            selected: settings.get_string('lock-type') === 'normal' ? 1 : 0,
+        });
+        passwordGroup.add(lockTypeRow);
+
+        const followCursorRow = new Adw.SwitchRow({
+            title: _('Follow Cursor'),
+            subtitle: _('Position the prompt relative to the cursor'),
+            active: settings.get_boolean('normal-prompt-follow-cursor'),
+        });
+        passwordGroup.add(followCursorRow);
+
+        const anchorModel = Gtk.StringList.new([
+            _('Bottom Right'),
+            _('Top Right'),
+            _('Top Left'),
+            _('Bottom Left'),
+        ]);
+        const anchorValues = ['br', 'tr', 'tl', 'bl'];
+        const anchorRow = new Adw.ComboRow({
+            title: _('Cursor Anchor'),
+            subtitle: _('Where to place the prompt relative to the cursor'),
+            model: anchorModel,
+        });
+        passwordGroup.add(anchorRow);
+
+        const offsetXRow = new Adw.SpinRow({
+            title: _('Cursor Offset X'),
+            subtitle: _('Horizontal offset from the cursor (px)'),
+            adjustment: new Gtk.Adjustment({
+                lower: -500,
+                upper: 500,
+                step_increment: 1,
+                page_increment: 10,
+            }),
+            value: settings.get_int('normal-prompt-offset-x'),
+        });
+        passwordGroup.add(offsetXRow);
+
+        const offsetYRow = new Adw.SpinRow({
+            title: _('Cursor Offset Y'),
+            subtitle: _('Vertical offset from the cursor (px)'),
+            adjustment: new Gtk.Adjustment({
+                lower: -500,
+                upper: 500,
+                step_increment: 1,
+                page_increment: 10,
+            }),
+            value: settings.get_int('normal-prompt-offset-y'),
+        });
+        passwordGroup.add(offsetYRow);
+
+        const fixedXRow = new Adw.SpinRow({
+            title: _('Fixed X'),
+            subtitle: _('Prompt X position (px). Use -1 to center'),
+            adjustment: new Gtk.Adjustment({
+                lower: -1,
+                upper: 10000,
+                step_increment: 1,
+                page_increment: 50,
+            }),
+            value: settings.get_int('normal-prompt-fixed-x'),
+        });
+        passwordGroup.add(fixedXRow);
+
+        const fixedYRow = new Adw.SpinRow({
+            title: _('Fixed Y'),
+            subtitle: _('Prompt Y position (px). Use -1 to center'),
+            adjustment: new Gtk.Adjustment({
+                lower: -1,
+                upper: 10000,
+                step_increment: 1,
+                page_increment: 50,
+            }),
+            value: settings.get_int('normal-prompt-fixed-y'),
+        });
+        passwordGroup.add(fixedYRow);
+
+        const customCssRow = new Adw.ActionRow({
+            title: _('Custom CSS'),
+            subtitle: _('Override prompt styling (inline CSS)'),
+        });
+        const editCssButton = new Gtk.Button({
+            icon_name: 'document-edit-symbolic',
+            valign: Gtk.Align.CENTER,
+            css_classes: ['flat'],
+        });
+        customCssRow.add_suffix(editCssButton);
+        customCssRow.activatable_widget = editCssButton;
+        passwordGroup.add(customCssRow);
+
+        const customJsRow = new Adw.ActionRow({
+            title: _('Custom JS'),
+            subtitle: _('Run custom JS to modify the prompt (advanced, use with care)'),
+        });
+        const editJsButton = new Gtk.Button({
+            icon_name: 'document-edit-symbolic',
+            valign: Gtk.Align.CENTER,
+            css_classes: ['flat'],
+        });
+        customJsRow.add_suffix(editJsButton);
+        customJsRow.activatable_widget = editJsButton;
+        passwordGroup.add(customJsRow);
+
+        const syncPasswordUi = () => {
+            const isNormal = settings.get_string('lock-type') === 'normal';
+            const follow = settings.get_boolean('normal-prompt-follow-cursor');
+
+            followCursorRow.sensitive = isNormal;
+
+            anchorRow.sensitive = isNormal && follow;
+            offsetXRow.sensitive = isNormal && follow;
+            offsetYRow.sensitive = isNormal && follow;
+
+            fixedXRow.sensitive = isNormal && !follow;
+            fixedYRow.sensitive = isNormal && !follow;
+
+            customCssRow.sensitive = isNormal;
+            editCssButton.sensitive = isNormal;
+            customJsRow.sensitive = isNormal;
+            editJsButton.sensitive = isNormal;
+        };
+
+        const syncAnchorSelected = () => {
+            const current = settings.get_string('normal-prompt-cursor-anchor') || 'br';
+            const idx = Math.max(0, anchorValues.indexOf(current));
+            anchorRow.selected = idx;
+        };
+        syncAnchorSelected();
+
+        lockTypeRow.connect('notify::selected', () => {
+            settings.set_string('lock-type', lockTypeRow.selected === 1 ? 'normal' : 'stealth');
+            syncPasswordUi();
+        });
+        settings.connect('changed::lock-type', () => {
+            lockTypeRow.selected = settings.get_string('lock-type') === 'normal' ? 1 : 0;
+            syncPasswordUi();
+        });
+
+        followCursorRow.connect('notify::active', () => {
+            settings.set_boolean('normal-prompt-follow-cursor', followCursorRow.active);
+            syncPasswordUi();
+        });
+        settings.connect('changed::normal-prompt-follow-cursor', () => {
+            followCursorRow.active = settings.get_boolean('normal-prompt-follow-cursor');
+            syncPasswordUi();
+        });
+
+        anchorRow.connect('notify::selected', () => {
+            const value = anchorValues[anchorRow.selected] ?? 'br';
+            settings.set_string('normal-prompt-cursor-anchor', value);
+        });
+        settings.connect('changed::normal-prompt-cursor-anchor', () => {
+            syncAnchorSelected();
+        });
+
+        offsetXRow.connect('notify::value', () => {
+            settings.set_int('normal-prompt-offset-x', Math.round(offsetXRow.value));
+        });
+        settings.connect('changed::normal-prompt-offset-x', () => {
+            offsetXRow.value = settings.get_int('normal-prompt-offset-x');
+        });
+
+        offsetYRow.connect('notify::value', () => {
+            settings.set_int('normal-prompt-offset-y', Math.round(offsetYRow.value));
+        });
+        settings.connect('changed::normal-prompt-offset-y', () => {
+            offsetYRow.value = settings.get_int('normal-prompt-offset-y');
+        });
+
+        fixedXRow.connect('notify::value', () => {
+            settings.set_int('normal-prompt-fixed-x', Math.round(fixedXRow.value));
+        });
+        settings.connect('changed::normal-prompt-fixed-x', () => {
+            fixedXRow.value = settings.get_int('normal-prompt-fixed-x');
+        });
+
+        fixedYRow.connect('notify::value', () => {
+            settings.set_int('normal-prompt-fixed-y', Math.round(fixedYRow.value));
+        });
+        settings.connect('changed::normal-prompt-fixed-y', () => {
+            fixedYRow.value = settings.get_int('normal-prompt-fixed-y');
+        });
+
+        editCssButton.connect('clicked', () => {
+            this._showTextEditDialog(
+                window,
+                settings,
+                'normal-prompt-css',
+                _('Custom CSS'),
+                _('Inline CSS applied to the Normal password prompt container.')
+            );
+        });
+
+        editJsButton.connect('clicked', () => {
+            this._showTextEditDialog(
+                window,
+                settings,
+                'normal-prompt-custom-js',
+                _('Custom JS'),
+                _('Advanced: runs inside GNOME Shell. The code receives a single object `ctx` with fields like `ctx.event`, `ctx.prompt`, `ctx.text`, `ctx.revealButton`, `ctx.buffer`, `ctx.masked`, `ctx.revealed`.')
+            );
+        });
+
+        syncPasswordUi();
+
         // Cursor group
         const cursorGroup = new Adw.PreferencesGroup({
             title: _('Cursor'),
@@ -663,6 +880,68 @@ export default class StealthLockPreferences extends ExtensionPreferences {
             dialog.destroy();
         });
         
+        dialog.present();
+    }
+
+    _showTextEditDialog(window, settings, settingsKey, title, description) {
+        const dialog = new Gtk.Dialog({
+            title,
+            modal: true,
+            transient_for: window,
+            default_width: 720,
+            default_height: 520,
+        });
+
+        dialog.add_button(_('Cancel'), Gtk.ResponseType.CANCEL);
+        dialog.add_button(_('Save'), Gtk.ResponseType.OK);
+
+        const contentArea = dialog.get_content_area();
+        contentArea.set_margin_top(12);
+        contentArea.set_margin_bottom(12);
+        contentArea.set_margin_start(12);
+        contentArea.set_margin_end(12);
+        contentArea.set_spacing(12);
+
+        if (description) {
+            const label = new Gtk.Label({
+                label: description,
+                wrap: true,
+                xalign: 0,
+            });
+            contentArea.append(label);
+        }
+
+        const scrolled = new Gtk.ScrolledWindow({
+            hexpand: true,
+            vexpand: true,
+        });
+        scrolled.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC);
+
+        const textView = new Gtk.TextView({
+            monospace: true,
+            wrap_mode: Gtk.WrapMode.NONE,
+        });
+        scrolled.set_child(textView);
+        contentArea.append(scrolled);
+
+        const buffer = textView.get_buffer();
+        buffer.set_text(settings.get_string(settingsKey) ?? '', -1);
+
+        dialog.connect('response', (d, response) => {
+            try {
+                if (response === Gtk.ResponseType.OK) {
+                    const start = buffer.get_start_iter();
+                    const end = buffer.get_end_iter();
+                    const text = buffer.get_text(start, end, false);
+                    settings.set_string(settingsKey, text);
+                }
+            } catch (e) {
+                // Ignore
+            } finally {
+                d.destroy();
+            }
+        });
+
         dialog.present();
     }
 }

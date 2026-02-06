@@ -11,3 +11,34 @@
     background-position: center;
     background-repeat: no-repeat;
 }
+
+/* Normal lock type password prompt */
+#stealthLockPasswordPrompt {
+    background-color: #ffffff;
+    border: 1px solid #c0c0c0;
+    border-radius: 6px;
+    padding: 8px 14px;
+    spacing: 10px;
+}
+
+#stealthLockPasswordText {
+    color: #333333;
+    font-size: 22px;
+    min-width: 220px;
+    min-height: 24px;
+}
+
+.stealth-lock-password-reveal-icon {
+    icon-size: 20px;
+    color: #757575;
+}
+
+#stealthLockPasswordRevealButton {
+    padding: 4px;
+    border-radius: 4px;
+}
+
+#stealthLockPasswordRevealButton:hover {
+    background-color: rgba(0, 0, 0, 0.08);
+}
+

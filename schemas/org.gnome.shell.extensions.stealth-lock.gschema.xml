@@ -88,6 +88,83 @@
       </description>
     </key>
 
+    <key name="lock-type" type="s">
+      <default>'stealth'</default>
+      <summary>Lock Type</summary>
+      <description>
+        Controls how password entry behaves while locked.
+        "stealth" shows no UI, while "normal" shows an on-screen password prompt.
+      </description>
+    </key>
+
+    <key name="normal-prompt-follow-cursor" type="b">
+      <default>false</default>
+      <summary>Follow Cursor</summary>
+      <description>
+        When enabled (Normal lock type), the password prompt follows the cursor.
+      </description>
+    </key>
+
+    <key name="normal-prompt-cursor-anchor" type="s">
+      <default>'br'</default>
+      <summary>Cursor Anchor</summary>
+      <description>
+        Where to place the prompt relative to the cursor when following it:
+        "br" bottom-right, "tr" top-right, "tl" top-left, "bl" bottom-left.
+      </description>
+    </key>
+
+    <key name="normal-prompt-offset-x" type="i">
+      <default>12</default>
+      <summary>Cursor Offset X</summary>
+      <description>
+        Horizontal offset (pixels) from the cursor when following it.
+      </description>
+    </key>
+
+    <key name="normal-prompt-offset-y" type="i">
+      <default>12</default>
+      <summary>Cursor Offset Y</summary>
+      <description>
+        Vertical offset (pixels) from the cursor when following it.
+      </description>
+    </key>
+
+    <key name="normal-prompt-fixed-x" type="i">
+      <default>-1</default>
+      <summary>Fixed X</summary>
+      <description>
+        Fixed X position (pixels) for the password prompt when not following the cursor.
+        Use -1 to center horizontally.
+      </description>
+    </key>
+
+    <key name="normal-prompt-fixed-y" type="i">
+      <default>-1</default>
+      <summary>Fixed Y</summary>
+      <description>
+        Fixed Y position (pixels) for the password prompt when not following the cursor.
+        Use -1 to center vertically.
+      </description>
+    </key>
+
+    <key name="normal-prompt-css" type="s">
+      <default>''</default>
+      <summary>Normal Prompt CSS</summary>
+      <description>
+        Optional inline CSS applied to the password prompt container in Normal lock type.
+      </description>
+    </key>
+
+    <key name="normal-prompt-custom-js" type="s">
+      <default>''</default>
+      <summary>Normal Prompt Custom JS</summary>
+      <description>
+        Optional JavaScript snippet executed for the password prompt (Normal lock type).
+        Receives a context object; use with care.
+      </description>
+    </key>
+
     <key name="debug-show-info" type="b">
       <default>true</default>
       <summary>Show Debug Info</summary>

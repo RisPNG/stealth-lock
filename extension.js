@@ -30,6 +30,7 @@ const MPRIS_PLAYER_INTERFACE = 'org.mpris.MediaPlayer2.Player';
 const DEFAULT_AUTO_RESET_SECONDS = 5;
 const SCREENSHOT_TIMEOUT_MS = 3000;
 const AUTH_TIMEOUT_MS = 10000;
+const PASSWORD_BULLET = '\u2022';
 
 // Cursor bitmap embedded as XBM-style bitmaps (LSB-first per byte).
 // Source bitmap decides foreground/background within the mask.
@@ -367,6 +368,15 @@ export default class StealthLockExtension extends Extension {
         this._lastCursorLocalPos = null;
         this._lastDebugCursorLabelUpdate = 0;
         this._abortHotkeySyncing = false;
+
+        this._passwordPrompt = null;
+        this._passwordPromptText = null;
+        this._passwordPromptRevealButton = null;
+        this._passwordPromptRevealIcon = null;
+        this._passwordPromptRevealed = false;
+        this._passwordPromptLastStageX = null;
+        this._passwordPromptLastStageY = null;
+        this._passwordPromptCustomFn = null;
     }
     
     enable() {
@@ -457,6 +467,19 @@ export default class StealthLockExtension extends Extension {
         } catch (e) {
             return true;
         }
+    }
+
+    _getLockType() {
+        try {
+            const t = this._settings?.get_string('lock-type')?.trim();
+            return t || 'stealth';
+        } catch (e) {
+            return 'stealth';
+        }
+    }
+
+    _isNormalLockType() {
+        return this._getLockType() === 'normal';
     }
 
     _shouldPauseMedia() {
@@ -616,6 +639,9 @@ export default class StealthLockExtension extends Extension {
             // 5. Change cursor to lock icon
             if (this._shouldLockCursor())
                 this._setLockCursor();
+
+            // Password prompt (optional) - add late so it renders on top
+            this._syncPasswordPrompt();
             
             // 6. Grab keyboard input
             this._grabKeyboard();
@@ -650,6 +676,9 @@ export default class StealthLockExtension extends Extension {
 
         // 3. Restore cursor
         this._restoreCursor();
+
+        // 3b. Remove password prompt
+        this._destroyPasswordPrompt();
 
         // 4. Remove overlay
         if (this._overlay) {
@@ -694,11 +723,32 @@ export default class StealthLockExtension extends Extension {
             if (type === Clutter.EventType.KEY_PRESS || type === Clutter.EventType.KEY_RELEASE)
                 return Clutter.EVENT_PROPAGATE;
 
-            if (type === Clutter.EventType.MOTION && this._cursorActor) {
-                const coords = event.get_coords();
-                const ex = coords?.x ?? coords?.[0] ?? 0;
-                const ey = coords?.y ?? coords?.[1] ?? 0;
-                this._setCursorActorPositionFromStage(ex, ey);
+            const coords = event.get_coords?.();
+            const ex = coords?.x ?? coords?.[0] ?? 0;
+            const ey = coords?.y ?? coords?.[1] ?? 0;
+
+            if (type === Clutter.EventType.MOTION) {
+                if (this._cursorActor)
+                    this._setCursorActorPositionFromStage(ex, ey);
+
+                if (this._passwordPrompt && this._shouldNormalPromptFollowCursor()) {
+                    this._passwordPromptLastStageX = ex;
+                    this._passwordPromptLastStageY = ey;
+                    this._setPasswordPromptPositionFromStage(ex, ey);
+                }
+
+                // Allow hover on the prompt when it's fixed-position.
+                if (this._passwordPrompt && !this._shouldNormalPromptFollowCursor() && this._isPointerInPasswordPrompt(ex, ey))
+                    return Clutter.EVENT_PROPAGATE;
+
+                return Clutter.EVENT_STOP;
+            }
+
+            if (type === Clutter.EventType.BUTTON_PRESS || type === Clutter.EventType.BUTTON_RELEASE) {
+                // Only allow clicks on the password prompt UI.
+                if (this._passwordPrompt && this._isPointerInPasswordPrompt(ex, ey))
+                    return Clutter.EVENT_PROPAGATE;
+                return Clutter.EVENT_STOP;
             }
 
             return Clutter.EVENT_STOP;
@@ -777,6 +827,16 @@ export default class StealthLockExtension extends Extension {
             if (this._passwordBuffer.length === 0)
                 console.log('Stealth Lock: Unlock attempt (empty buffer)');
             this._attemptUnlock();
+            this._updatePasswordPrompt();
+            return Clutter.EVENT_STOP;
+        }
+
+        // Normal prompt: toggle reveal (Ctrl+R)
+        const isCtrl = (state & Clutter.ModifierType.CONTROL_MASK) !== 0;
+        if (isCtrl && (keyval === Clutter.KEY_r || keyval === Clutter.KEY_R) && this._passwordPromptRevealIcon) {
+            this._passwordPromptRevealed = !this._passwordPromptRevealed;
+            this._passwordPromptRevealIcon.icon_name = this._passwordPromptRevealed ? 'view-conceal-symbolic' : 'view-reveal-symbolic';
+            this._updatePasswordPrompt();
             return Clutter.EVENT_STOP;
         }
         
@@ -786,6 +846,7 @@ export default class StealthLockExtension extends Extension {
                 this._passwordBuffer = this._passwordBuffer.slice(0, -1);
             }
             this._updateDebugLabel();
+            this._updatePasswordPrompt();
             return Clutter.EVENT_STOP;
         }
         
@@ -794,6 +855,7 @@ export default class StealthLockExtension extends Extension {
             this._passwordBuffer = '';
             this._handleDebugAbortSequence();
             this._updateDebugLabel();
+            this._updatePasswordPrompt();
             return Clutter.EVENT_STOP;
         }
         
@@ -812,6 +874,7 @@ export default class StealthLockExtension extends Extension {
             if (this._isDebugMode())
                 console.log(`Stealth Lock: KEY sym=0x${keyval.toString(16)} uni=U+${keychar.toString(16).padStart(4, '0')} bufLen=${this._passwordBuffer.length}`);
             this._updateDebugLabel();
+            this._updatePasswordPrompt();
         } else if (this._isDebugMode()) {
             console.log(`Stealth Lock: KEY sym=0x${keyval.toString(16)} uni=NONE (not added)`);
         }
@@ -900,6 +963,7 @@ export default class StealthLockExtension extends Extension {
             () => {
                 console.log('Stealth Lock: Password reset due to inactivity');
                 this._passwordBuffer = '';
+                this._updatePasswordPrompt();
                 this._passwordResetTimeoutId = null;
                 return GLib.SOURCE_REMOVE;
             }
@@ -918,6 +982,7 @@ export default class StealthLockExtension extends Extension {
         
         const password = this._passwordBuffer;
         this._passwordBuffer = ''; // Clear immediately for security
+        this._updatePasswordPrompt();
 
         console.log(`Stealth Lock: Unlock attempt (len=${password.length})`);
         this._updateDebugLabel('auth=running');
@@ -1238,9 +1303,413 @@ export default class StealthLockExtension extends Extension {
             this._debugLabel = null;
         }
     }
+
+    _shouldNormalPromptFollowCursor() {
+        if (!this._settings)
+            return false;
+
+        if (!this._isNormalLockType())
+            return false;
+
+        try {
+            return !!this._settings.get_boolean('normal-prompt-follow-cursor');
+        } catch (e) {
+            return false;
+        }
+    }
+
+    _getNormalPromptAnchor() {
+        try {
+            return this._settings?.get_string('normal-prompt-cursor-anchor')?.trim() || 'br';
+        } catch (e) {
+            return 'br';
+        }
+    }
+
+    _getNormalPromptOffsets() {
+        const defaultX = 12;
+        const defaultY = 12;
+        try {
+            const ox = this._settings?.get_int('normal-prompt-offset-x');
+            const oy = this._settings?.get_int('normal-prompt-offset-y');
+            return {
+                x: Number.isFinite(ox) ? ox : defaultX,
+                y: Number.isFinite(oy) ? oy : defaultY,
+            };
+        } catch (e) {
+            return { x: defaultX, y: defaultY };
+        }
+    }
+
+    _getNormalPromptFixedPosition() {
+        try {
+            const x = this._settings?.get_int('normal-prompt-fixed-x');
+            const y = this._settings?.get_int('normal-prompt-fixed-y');
+            return {
+                x: Number.isFinite(x) ? x : -1,
+                y: Number.isFinite(y) ? y : -1,
+            };
+        } catch (e) {
+            return { x: -1, y: -1 };
+        }
+    }
+
+    _isSystemDarkTheme() {
+        try {
+            const ifaceSettings = new Gio.Settings({ schema: 'org.gnome.desktop.interface' });
+            const scheme = ifaceSettings.get_string('color-scheme');
+            return scheme === 'prefer-dark';
+        } catch (e) {
+            return false;
+        }
+    }
+
+    _compileNormalPromptCustomJs() {
+        this._passwordPromptCustomFn = null;
+        if (!this._settings)
+            return;
+
+        let src = '';
+        try {
+            src = this._settings.get_string('normal-prompt-custom-js') ?? '';
+        } catch (e) {
+            src = '';
+        }
+
+        src = src.trim();
+        if (!src)
+            return;
+
+        try {
+            // eslint-disable-next-line no-new-func
+            this._passwordPromptCustomFn = new Function('ctx', src);
+        } catch (e) {
+            console.error('Stealth Lock: Failed to compile normal-prompt-custom-js:', e);
+            this._passwordPromptCustomFn = null;
+        }
+    }
+
+    _runNormalPromptCustomJs(ctx) {
+        if (!this._passwordPromptCustomFn)
+            return;
+
+        try {
+            this._passwordPromptCustomFn(ctx);
+        } catch (e) {
+            console.error('Stealth Lock: normal-prompt-custom-js error:', e);
+        }
+    }
+
+    _syncPasswordPrompt() {
+        if (!this._locked || !this._overlay)
+            return;
+
+        if (!this._isNormalLockType()) {
+            this._destroyPasswordPrompt();
+            return;
+        }
+
+        if (!this._passwordPrompt)
+            this._createPasswordPrompt();
+
+        this._updatePasswordPrompt();
+        this._updatePasswordPromptPosition();
+
+        // Ensure cursor tracking is set up for prompt following.
+        // position-invalidated on the cursor tracker is more reliable than
+        // captured-event MOTION during pushModal with LOCK_SCREEN mode.
+        if (this._shouldNormalPromptFollowCursor())
+            this._ensurePromptCursorTracking();
+    }
+
+    _ensurePromptCursorTracking() {
+        // Already tracking via this dedicated handler
+        if (this._promptCursorMotionId)
+            return;
+
+        // If _setLockCursor() already connected position-invalidated via
+        // _cursorMotionId, _updateCursorPosition() will handle prompt updates
+        // too (we modified it above).  Still add a dedicated handler so prompt
+        // following works even when lock-cursor is disabled.
+        if (this._cursorMotionId)
+            return;
+
+        if (!this._cursorTracker) {
+            try {
+                if (global.backend?.get_cursor_tracker)
+                    this._cursorTracker = global.backend.get_cursor_tracker();
+                else
+                    this._cursorTracker = Meta.CursorTracker.get_for_display(global.display);
+            } catch (e) {
+                return;
+            }
+        }
+
+        if (!this._cursorTracker)
+            return;
+
+        this._promptCursorMotionId = this._cursorTracker.connect('position-invalidated', () => {
+            this._updateCursorPosition();
+        });
+    }
+
+    _createPasswordPrompt() {
+        if (!this._overlay || this._passwordPrompt)
+            return;
+
+        this._passwordPromptRevealed = false;
+        this._compileNormalPromptCustomJs();
+
+        const prompt = new St.BoxLayout({
+            name: 'stealthLockPasswordPrompt',
+            style_class: 'stealth-lock-password-prompt',
+            reactive: true,
+            can_focus: false,
+            track_hover: true,
+        });
+
+        const text = new St.Label({
+            name: 'stealthLockPasswordText',
+            style_class: 'stealth-lock-password-text',
+            text: '',
+            y_align: Clutter.ActorAlign.CENTER,
+        });
+        prompt.add_child(text);
+
+        const revealIcon = new St.Icon({
+            icon_name: 'view-reveal-symbolic',
+            style_class: 'stealth-lock-password-reveal-icon',
+        });
+
+        const revealButton = new St.Button({
+            name: 'stealthLockPasswordRevealButton',
+            style_class: 'stealth-lock-password-reveal-button',
+            reactive: true,
+            can_focus: false,
+            track_hover: true,
+            child: revealIcon,
+        });
+        revealButton.connect('clicked', () => {
+            this._passwordPromptRevealed = !this._passwordPromptRevealed;
+            revealIcon.icon_name = this._passwordPromptRevealed ? 'view-conceal-symbolic' : 'view-reveal-symbolic';
+            this._updatePasswordPrompt();
+        });
+        prompt.add_child(revealButton);
+
+        const isDark = this._isSystemDarkTheme();
+
+        // Dark theme defaults for child elements (not affected by user CSS).
+        if (isDark) {
+            text.style = 'color: #e0e0e0;';
+            revealIcon.style = 'color: #aaaaaa;';
+        }
+
+        // User CSS override (inline) takes priority over dark defaults.
+        try {
+            const css = this._settings?.get_string('normal-prompt-css') ?? '';
+            if (css.trim())
+                prompt.style = css;
+            else if (isDark)
+                prompt.style = 'background-color: #2d2d2d; border-color: #555555;';
+        } catch (e) {
+            if (isDark)
+                prompt.style = 'background-color: #2d2d2d; border-color: #555555;';
+        }
+
+        this._passwordPrompt = prompt;
+        this._passwordPromptText = text;
+        this._passwordPromptRevealButton = revealButton;
+        this._passwordPromptRevealIcon = revealIcon;
+
+        this._overlay.add_child(prompt);
+
+        // Raise cursor actor above the prompt so it renders on top
+        if (this._cursorActor && this._overlay.contains(this._cursorActor))
+            this._overlay.set_child_above_sibling(this._cursorActor, prompt);
+
+        this._runNormalPromptCustomJs({
+            event: 'init',
+            prompt,
+            text,
+            revealButton,
+            revealed: this._passwordPromptRevealed,
+            settings: this._settings,
+        });
+    }
+
+    _destroyPasswordPrompt() {
+        // Disconnect dedicated prompt cursor tracking
+        if (this._promptCursorMotionId && this._cursorTracker) {
+            try {
+                this._cursorTracker.disconnect(this._promptCursorMotionId);
+            } catch (e) {
+                // Ignore
+            }
+        }
+        this._promptCursorMotionId = null;
+
+        if (this._passwordPrompt) {
+            try {
+                this._passwordPrompt.destroy();
+            } catch (e) {
+                // Ignore
+            }
+        }
+
+        this._passwordPrompt = null;
+        this._passwordPromptText = null;
+        this._passwordPromptRevealButton = null;
+        this._passwordPromptRevealIcon = null;
+        this._passwordPromptRevealed = false;
+        this._passwordPromptLastStageX = null;
+        this._passwordPromptLastStageY = null;
+        this._passwordPromptCustomFn = null;
+    }
+
+    _updatePasswordPrompt() {
+        if (!this._passwordPrompt || !this._passwordPromptText)
+            return;
+
+        const masked = PASSWORD_BULLET.repeat(this._passwordBuffer.length);
+        const displayText = this._passwordPromptRevealed ? this._passwordBuffer : masked;
+        this._passwordPromptText.text = displayText;
+
+        this._runNormalPromptCustomJs({
+            event: 'update',
+            prompt: this._passwordPrompt,
+            text: this._passwordPromptText,
+            revealButton: this._passwordPromptRevealButton,
+            buffer: this._passwordBuffer,
+            masked,
+            revealed: this._passwordPromptRevealed,
+            settings: this._settings,
+        });
+
+        // Re-clamp/re-anchor if size changed (e.g. more bullets).
+        this._updatePasswordPromptPosition();
+    }
+
+    _updatePasswordPromptPosition() {
+        if (!this._passwordPrompt || !this._overlay)
+            return;
+
+        if (this._shouldNormalPromptFollowCursor()) {
+            // Use last known pointer position (updated by motion events), otherwise
+            // fall back to a one-time pointer query.
+            if (Number.isFinite(this._passwordPromptLastStageX) && Number.isFinite(this._passwordPromptLastStageY)) {
+                this._setPasswordPromptPositionFromStage(this._passwordPromptLastStageX, this._passwordPromptLastStageY);
+                return;
+            }
+
+            try {
+                const [x, y] = global.get_pointer();
+                this._passwordPromptLastStageX = x;
+                this._passwordPromptLastStageY = y;
+                this._setPasswordPromptPositionFromStage(x, y);
+                return;
+            } catch (e) {
+                // Ignore and fall through to fixed positioning
+            }
+        }
+
+        const fixed = this._getNormalPromptFixedPosition();
+        this._setPasswordPromptPositionFixed(fixed.x, fixed.y);
+    }
+
+    _setPasswordPromptPositionFixed(x, y) {
+        if (!this._passwordPrompt || !this._overlay)
+            return;
+
+        const { width: natW, height: natH } = this._getActorNaturalSize(this._passwordPrompt);
+        const promptW = this._passwordPrompt.width || natW || 0;
+        const promptH = this._passwordPrompt.height || natH || 0;
+        const overlayW = this._overlay.width || 0;
+        const overlayH = this._overlay.height || 0;
+
+        let px = x;
+        let py = y;
+        if (px < 0)
+            px = Math.round((overlayW - promptW) / 2);
+        if (py < 0)
+            py = Math.round((overlayH - promptH) / 2);
+
+        px = Math.max(0, Math.min(px, Math.max(0, overlayW - promptW)));
+        py = Math.max(0, Math.min(py, Math.max(0, overlayH - promptH)));
+
+        this._passwordPrompt.set_position(px, py);
+    }
+
+    _setPasswordPromptPositionFromStage(stageX, stageY) {
+        if (!this._passwordPrompt || !this._overlay)
+            return;
+
+        const overlayX = this._overlay.x ?? 0;
+        const overlayY = this._overlay.y ?? 0;
+        const cx = stageX - overlayX;
+        const cy = stageY - overlayY;
+
+        const { width: natW, height: natH } = this._getActorNaturalSize(this._passwordPrompt);
+        const promptW = this._passwordPrompt.width || natW || 0;
+        const promptH = this._passwordPrompt.height || natH || 0;
+        const overlayW = this._overlay.width || 0;
+        const overlayH = this._overlay.height || 0;
+
+        const offsets = this._getNormalPromptOffsets();
+        const anchor = this._getNormalPromptAnchor();
+
+        let px = cx + offsets.x;
+        let py = cy + offsets.y;
+
+        if (anchor === 'tr') {
+            px = cx + offsets.x;
+            py = cy - promptH - offsets.y;
+        } else if (anchor === 'tl') {
+            px = cx - promptW - offsets.x;
+            py = cy - promptH - offsets.y;
+        } else if (anchor === 'bl') {
+            px = cx - promptW - offsets.x;
+            py = cy + offsets.y;
+        } // else 'br'
+
+        px = Math.max(0, Math.min(px, Math.max(0, overlayW - promptW)));
+        py = Math.max(0, Math.min(py, Math.max(0, overlayH - promptH)));
+
+        this._passwordPrompt.set_position(px, py);
+    }
+
+    _getActorNaturalSize(actor) {
+        try {
+            const [, natW] = actor.get_preferred_width(-1);
+            const [, natH] = actor.get_preferred_height(-1);
+            return { width: natW, height: natH };
+        } catch (e) {
+            return { width: actor?.width ?? 0, height: actor?.height ?? 0 };
+        }
+    }
+
+    _isPointerInPasswordPrompt(stageX, stageY) {
+        if (!this._passwordPrompt || !this._overlay)
+            return false;
+
+        const overlayX = this._overlay.x ?? 0;
+        const overlayY = this._overlay.y ?? 0;
+        const promptX = overlayX + (this._passwordPrompt.x ?? 0);
+        const promptY = overlayY + (this._passwordPrompt.y ?? 0);
+
+        const { width: natW, height: natH } = this._getActorNaturalSize(this._passwordPrompt);
+        const promptW = this._passwordPrompt.width || natW || 0;
+        const promptH = this._passwordPrompt.height || natH || 0;
+
+        return stageX >= promptX && stageX <= (promptX + promptW) &&
+            stageY >= promptY && stageY <= (promptY + promptH);
+    }
     
     _updateCursorPosition() {
-        if (!this._cursorActor || !this._cursorTracker) return;
+        if (!this._cursorTracker) return;
+
+        const needsCursor = !!this._cursorActor;
+        const needsPrompt = this._passwordPrompt && this._shouldNormalPromptFollowCursor();
+        if (!needsCursor && !needsPrompt) return;
 
         try {
             const result = this._cursorTracker.get_pointer();
@@ -1249,7 +1718,15 @@ export default class StealthLockExtension extends Extension {
             const first = result[0];
             const px = (first?.x !== undefined) ? first.x : first;
             const py = (first?.y !== undefined) ? first.y : result[1];
-            this._setCursorActorPositionFromStage(px, py);
+
+            if (needsCursor)
+                this._setCursorActorPositionFromStage(px, py);
+
+            if (needsPrompt) {
+                this._passwordPromptLastStageX = px;
+                this._passwordPromptLastStageY = py;
+                this._setPasswordPromptPositionFromStage(px, py);
+            }
         } catch (e) {
             // Ignore position errors
         }
@@ -1280,6 +1757,15 @@ export default class StealthLockExtension extends Extension {
     
     _restoreCursor() {
         // Disconnect cursor tracking
+        if (this._promptCursorMotionId && this._cursorTracker) {
+            try {
+                this._cursorTracker.disconnect(this._promptCursorMotionId);
+            } catch (e) {
+                // Ignore
+            }
+            this._promptCursorMotionId = null;
+        }
+
         if (this._cursorMotionId && this._cursorTracker) {
             this._cursorTracker.disconnect(this._cursorMotionId);
             this._cursorMotionId = null;
