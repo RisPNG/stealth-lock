@@ -130,6 +130,16 @@
       </description>
     </key>
 
+    <key name="normal-prompt-monitor" type="s">
+      <default>''</default>
+      <summary>Prompt Monitor</summary>
+      <description>
+        Which monitor to center the password prompt on when using fixed position.
+        Empty string means center across all monitors.
+        Value is the monitor index (e.g. "0", "1").
+      </description>
+    </key>
+
     <key name="normal-prompt-fixed-x" type="i">
       <default>-1</default>
       <summary>Fixed X</summary>

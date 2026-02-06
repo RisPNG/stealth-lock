@@ -269,6 +269,50 @@ export default class StealthLockPreferences extends ExtensionPreferences {
         });
         passwordGroup.add(offsetYRow);
 
+        // Monitor selection (populated dynamically from connected monitors)
+        const monitorLabels = [_('All Monitors')];
+        const monitorValues = [''];
+        try {
+            const display = Gdk.Display.get_default();
+            if (display) {
+                const monitorList = display.get_monitors();
+                const n = monitorList.get_n_items();
+                for (let i = 0; i < n; i++) {
+                    const mon = monitorList.get_item(i);
+                    const connector = mon.get_connector?.() ?? '';
+                    const model = mon.get_model?.() ?? '';
+                    const parts = [String(i)];
+                    if (connector) parts.push(connector);
+                    if (model) parts.push(`(${model})`);
+                    monitorLabels.push(parts.join(': '));
+                    monitorValues.push(String(i));
+                }
+            }
+        } catch (e) {
+            // Ignore - "All Monitors" will be the only option
+        }
+
+        const monitorModel = Gtk.StringList.new(monitorLabels);
+        const monitorRow = new Adw.ComboRow({
+            title: _('Monitor'),
+            subtitle: _('Which monitor to center the prompt on'),
+            model: monitorModel,
+        });
+        passwordGroup.add(monitorRow);
+
+        const syncMonitorSelected = () => {
+            const current = settings.get_string('normal-prompt-monitor') || '';
+            const idx = Math.max(0, monitorValues.indexOf(current));
+            monitorRow.selected = idx;
+        };
+        syncMonitorSelected();
+
+        monitorRow.connect('notify::selected', () => {
+            const value = monitorValues[monitorRow.selected] ?? '';
+            settings.set_string('normal-prompt-monitor', value);
+        });
+        settings.connect('changed::normal-prompt-monitor', syncMonitorSelected);
+
         const fixedXRow = new Adw.SpinRow({
             title: _('Fixed X'),
             subtitle: _('Prompt X position (px). Use -1 to center'),
@@ -331,6 +375,7 @@ export default class StealthLockPreferences extends ExtensionPreferences {
             offsetXRow.sensitive = isNormal && follow;
             offsetYRow.sensitive = isNormal && follow;
 
+            monitorRow.sensitive = isNormal && !follow;
             fixedXRow.sensitive = isNormal && !follow;
             fixedYRow.sensitive = isNormal && !follow;
 

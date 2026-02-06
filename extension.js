@@ -1354,6 +1354,25 @@ export default class StealthLockExtension extends Extension {
         }
     }
 
+    _getSelectedMonitor() {
+        try {
+            const monitorSetting = this._settings?.get_string('normal-prompt-monitor')?.trim() ?? '';
+            if (!monitorSetting)
+                return null;
+
+            const monitors = Main.layoutManager.monitors;
+            if (!monitors?.length)
+                return null;
+
+            const idx = parseInt(monitorSetting, 10);
+            if (Number.isFinite(idx) && idx >= 0 && idx < monitors.length)
+                return monitors[idx];
+        } catch (e) {
+            // Ignore
+        }
+        return null;
+    }
+
     _isSystemDarkTheme() {
         try {
             const ifaceSettings = new Gio.Settings({ schema: 'org.gnome.desktop.interface' });
@@ -1625,13 +1644,30 @@ export default class StealthLockExtension extends Extension {
         const promptH = this._passwordPrompt.height || natH || 0;
         const overlayW = this._overlay.width || 0;
         const overlayH = this._overlay.height || 0;
+        const originX = this._overlay._originX ?? 0;
+        const originY = this._overlay._originY ?? 0;
 
         let px = x;
         let py = y;
-        if (px < 0)
-            px = Math.round((overlayW - promptW) / 2);
-        if (py < 0)
-            py = Math.round((overlayH - promptH) / 2);
+
+        if (px < 0 || py < 0) {
+            const monitor = this._getSelectedMonitor();
+            if (monitor) {
+                // Center within the selected monitor's area
+                const mx = monitor.x - originX;
+                const my = monitor.y - originY;
+                if (px < 0)
+                    px = mx + Math.round((monitor.width - promptW) / 2);
+                if (py < 0)
+                    py = my + Math.round((monitor.height - promptH) / 2);
+            } else {
+                // Center across all monitors
+                if (px < 0)
+                    px = Math.round((overlayW - promptW) / 2);
+                if (py < 0)
+                    py = Math.round((overlayH - promptH) / 2);
+            }
+        }
 
         px = Math.max(0, Math.min(px, Math.max(0, overlayW - promptW)));
         py = Math.max(0, Math.min(py, Math.max(0, overlayH - promptH)));
