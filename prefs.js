@@ -248,23 +248,119 @@ export default class StealthLockPreferences extends ExtensionPreferences {
         });
         cursorBitmapRow.add_suffix(clearCursorBitmapButton);
 
-        browseCursorBitmapButton.connect('clicked', async () => {
+        browseCursorBitmapButton.connect('clicked', () => {
             try {
-                const dialog = new Gtk.FileDialog({
-                    title: _('Select Cursor Image'),
-                });
-                const file = await dialog.open(window, null);
-                if (!file)
-                    return;
+                console.log('Stealth Lock prefs: Browse cursor image');
 
-                const path = file.get_path();
-                if (path) {
-                    settings.set_string('cursor-bitmap-path', path);
-                } else {
-                    settings.set_string('cursor-bitmap-path', file.get_uri());
+                if (this._cursorBitmapDialogCancellable) {
+                    try {
+                        this._cursorBitmapDialogCancellable.cancel();
+                    } catch (e) {
+                        // Ignore
+                    }
+                    this._cursorBitmapDialogCancellable = null;
                 }
+
+                const imageFilter = new Gtk.FileFilter();
+                imageFilter.set_name(_('Images'));
+                imageFilter.add_mime_type('image/png');
+                imageFilter.add_mime_type('image/svg+xml');
+                imageFilter.add_mime_type('image/*');
+
+                const allFilter = new Gtk.FileFilter();
+                allFilter.set_name(_('All Files'));
+                allFilter.add_pattern('*');
+
+                // Prefer Gtk.FileDialog (GTK4) for portal-backed picking.
+                if (Gtk.FileDialog) {
+                    console.log('Stealth Lock prefs: Using Gtk.FileDialog');
+                    const dialog = new Gtk.FileDialog({
+                        title: _('Select Cursor Image'),
+                    });
+                    this._cursorBitmapDialog = dialog;
+
+                    const filters = new Gio.ListStore({ item_type: Gtk.FileFilter });
+                    filters.append(imageFilter);
+                    filters.append(allFilter);
+                    dialog.set_filters(filters);
+                    dialog.set_default_filter(imageFilter);
+
+                    const cancellable = new Gio.Cancellable();
+                    this._cursorBitmapDialogCancellable = cancellable;
+
+                    browseCursorBitmapButton.sensitive = false;
+                    dialog.open(window, cancellable, (source, result) => {
+                        try {
+                            const file = dialog.open_finish(result);
+                            if (!file)
+                                return;
+
+                            const path = file.get_path();
+                            if (path) {
+                                settings.set_string('cursor-bitmap-path', path);
+                            } else {
+                                settings.set_string('cursor-bitmap-path', file.get_uri());
+                            }
+                        } catch (e) {
+                            // Cancelled or failed - ignore, but log failures for troubleshooting.
+                            if (!e?.matches?.(Gio.IOErrorEnum, Gio.IOErrorEnum.CANCELLED))
+                                console.error('Stealth Lock prefs: Cursor image picker failed:', e);
+                        } finally {
+                            browseCursorBitmapButton.sensitive = true;
+                            if (this._cursorBitmapDialog === dialog)
+                                this._cursorBitmapDialog = null;
+                            if (this._cursorBitmapDialogCancellable === cancellable)
+                                this._cursorBitmapDialogCancellable = null;
+                        }
+                    });
+
+                    return;
+                }
+
+                // Fallback (older stacks): Gtk.FileChooserNative.
+                console.log('Stealth Lock prefs: Using Gtk.FileChooserNative');
+                const chooser = new Gtk.FileChooserNative({
+                    title: _('Select Cursor Image'),
+                    transient_for: window,
+                    modal: true,
+                    action: Gtk.FileChooserAction.OPEN,
+                    accept_label: _('Open'),
+                    cancel_label: _('Cancel'),
+                });
+                this._cursorBitmapChooser = chooser;
+
+                chooser.add_filter(imageFilter);
+                chooser.add_filter(allFilter);
+                chooser.set_filter(imageFilter);
+
+                chooser.connect('response', (dlg, response) => {
+                    try {
+                        if (response !== Gtk.ResponseType.ACCEPT)
+                            return;
+
+                        const file = dlg.get_file();
+                        if (!file)
+                            return;
+
+                        const path = file.get_path();
+                        if (path) {
+                            settings.set_string('cursor-bitmap-path', path);
+                        } else {
+                            settings.set_string('cursor-bitmap-path', file.get_uri());
+                        }
+                    } catch (e) {
+                        console.error('Stealth Lock prefs: Cursor image picker failed:', e);
+                    } finally {
+                        dlg.destroy();
+                        if (this._cursorBitmapChooser === dlg)
+                            this._cursorBitmapChooser = null;
+                    }
+                });
+
+                chooser.show();
             } catch (e) {
-                // Cancelled or failed - ignore
+                console.error('Stealth Lock prefs: Failed to open cursor image picker:', e);
+                browseCursorBitmapButton.sensitive = true;
             }
         });
 
