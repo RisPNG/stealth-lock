@@ -7,4 +7,4 @@ The main idea comes from xtrlock, but that package only works for x11. As I am o
 I like locking my screen, but I don't like having my system going to a different screen to do it. So instead of a lock screen, I want a screen lock.
 
 ## PSA
-I have little to zero knowledge of an extension for the GNOME Shell, let alone develop it. So this extension has been basically birthed to life by vibe-coding, although I do possess programming skills to steer the AI towards a certain direction that's not entirely absolutely trash code.
+I have little to zero knowledge about GNOME Shell extensions, let alone develop it. So this extension has been basically birthed to life by vibe-coding, although I do possess programming skills to steer the AI towards a certain direction that's not entirely absolutely trash code.
