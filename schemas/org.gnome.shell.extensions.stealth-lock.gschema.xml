@@ -28,6 +28,91 @@
         This unlocks without a password and should only be used for debugging.
       </description>
     </key>
+
+    <key name="freeze-display" type="b">
+      <default>true</default>
+      <summary>Freeze Display</summary>
+      <description>
+        When enabled, captures screenshots of all monitors and shows them as an overlay while locked.
+        When disabled, the lock remains active but the display is not frozen.
+      </description>
+    </key>
+
+    <key name="pause-media" type="b">
+      <default>true</default>
+      <summary>Pause Media</summary>
+      <description>
+        When enabled, pauses all playing media (MPRIS) on lock and resumes on unlock.
+      </description>
+    </key>
+
+    <key name="lock-cursor" type="b">
+      <default>true</default>
+      <summary>Lock Cursor</summary>
+      <description>
+        When enabled, replaces the system cursor with a lock cursor while locked.
+      </description>
+    </key>
+
+    <key name="cursor-bitmap-path" type="s">
+      <default>''</default>
+      <summary>Cursor Bitmap Path</summary>
+      <description>
+        Optional path to an image file to use as the lock cursor.
+        Leave empty to use the built-in cursor.
+      </description>
+    </key>
+
+    <key name="cursor-fg-rgba" type="au">
+      <default>[0, 0, 0, 255]</default>
+      <summary>Cursor Foreground RGBA</summary>
+      <description>
+        Foreground (outline/details) color for the built-in lock cursor, stored as [R, G, B, A] 0-255.
+      </description>
+    </key>
+
+    <key name="cursor-bg-rgba" type="au">
+      <default>[255, 255, 255, 255]</default>
+      <summary>Cursor Background RGBA</summary>
+      <description>
+        Background (fill) color for the built-in lock cursor, stored as [R, G, B, A] 0-255.
+      </description>
+    </key>
+
+    <key name="auto-reset-seconds" type="u">
+      <default>5</default>
+      <summary>Auto Reset Seconds</summary>
+      <description>
+        Seconds of inactivity before the password buffer is cleared.
+        Set to 0 to disable auto reset.
+      </description>
+    </key>
+
+    <key name="debug-show-info" type="b">
+      <default>true</default>
+      <summary>Show Debug Info</summary>
+      <description>
+        When Debug Mode is enabled, controls whether the on-screen debug overlay is shown.
+      </description>
+    </key>
+
+    <key name="debug-abort-use-lock-hotkey" type="b">
+      <default>false</default>
+      <summary>Use Lock Hotkey for Abort</summary>
+      <description>
+        When enabled, the Debug Abort Hotkey is forced to match the Lock Hotkey.
+        When disabled, you can set a separate Debug Abort Hotkey.
+      </description>
+    </key>
+
+    <key name="debug-abort-hotkey-custom" type="as">
+      <default><![CDATA[['<Control><Alt><Shift>u']]]></default>
+      <summary>Debug Abort Hotkey (Custom)</summary>
+      <description>
+        Stores the user-defined Debug Abort Hotkey when "Use Lock Hotkey for Abort" is enabled.
+        When the option is disabled, this value is restored back to Debug Abort Hotkey.
+      </description>
+    </key>
     
   </schema>
 </schemalist>

@@ -82,7 +82,236 @@ export default class StealthLockPreferences extends ExtensionPreferences {
             const hotkey = settings.get_strv('lock-hotkey')[0] || '<Super><Control>l';
             shortcutLabel.accelerator = hotkey;
         });
-        
+
+        const DEFAULT_LOCK_HOTKEY = '<Super><Control>l';
+        const DEFAULT_ABORT_HOTKEY = '<Control><Alt><Shift>u';
+
+        const getHotkey = (key, fallback) => {
+            try {
+                return settings.get_strv(key)[0] || fallback;
+            } catch (e) {
+                return fallback;
+            }
+        };
+
+        const setHotkey = (key, accel) => {
+            settings.set_strv(key, [accel]);
+        };
+
+        const clampByte = (value, fallback) => {
+            const n = Number(value);
+            if (!Number.isFinite(n))
+                return fallback;
+            return Math.max(0, Math.min(255, Math.round(n)));
+        };
+
+        const getRgbaBytes = (key, fallbackBytes) => {
+            try {
+                const unpacked = settings.get_value(key).deep_unpack();
+                if (!Array.isArray(unpacked) || unpacked.length !== 4)
+                    return fallbackBytes;
+                return unpacked.map((v, i) => clampByte(v, fallbackBytes[i]));
+            } catch (e) {
+                return fallbackBytes;
+            }
+        };
+
+        const bytesToRgba = (bytes) => {
+            const rgba = new Gdk.RGBA();
+            rgba.red = (bytes[0] ?? 0) / 255;
+            rgba.green = (bytes[1] ?? 0) / 255;
+            rgba.blue = (bytes[2] ?? 0) / 255;
+            rgba.alpha = (bytes[3] ?? 255) / 255;
+            return rgba;
+        };
+
+        const rgbaToBytes = (rgba) => ([
+            clampByte((rgba?.red ?? 0) * 255, 0),
+            clampByte((rgba?.green ?? 0) * 255, 0),
+            clampByte((rgba?.blue ?? 0) * 255, 0),
+            clampByte((rgba?.alpha ?? 1) * 255, 255),
+        ]);
+
+        const setRgbaBytes = (key, bytes) => {
+            settings.set_value(key, new GLib.Variant('au', bytes));
+        };
+
+        // Features group
+        const featuresGroup = new Adw.PreferencesGroup({
+            title: _('Features'),
+            description: _('Toggle optional behavior while locked'),
+        });
+        page.add(featuresGroup);
+
+        const freezeDisplayRow = new Adw.SwitchRow({
+            title: _('Freeze Display'),
+            subtitle: _('Capture screenshots and show them as a frozen overlay'),
+            active: settings.get_boolean('freeze-display'),
+        });
+        featuresGroup.add(freezeDisplayRow);
+
+        freezeDisplayRow.connect('notify::active', () => {
+            settings.set_boolean('freeze-display', freezeDisplayRow.active);
+        });
+        settings.connect('changed::freeze-display', () => {
+            freezeDisplayRow.active = settings.get_boolean('freeze-display');
+        });
+
+        const pauseMediaRow = new Adw.SwitchRow({
+            title: _('Pause Media'),
+            subtitle: _('Pause MPRIS media players on lock and resume on unlock'),
+            active: settings.get_boolean('pause-media'),
+        });
+        featuresGroup.add(pauseMediaRow);
+
+        pauseMediaRow.connect('notify::active', () => {
+            settings.set_boolean('pause-media', pauseMediaRow.active);
+        });
+        settings.connect('changed::pause-media', () => {
+            pauseMediaRow.active = settings.get_boolean('pause-media');
+        });
+
+        const lockCursorRow = new Adw.SwitchRow({
+            title: _('Lock Cursor'),
+            subtitle: _('Replace the cursor with a lock cursor while locked'),
+            active: settings.get_boolean('lock-cursor'),
+        });
+        featuresGroup.add(lockCursorRow);
+
+        lockCursorRow.connect('notify::active', () => {
+            settings.set_boolean('lock-cursor', lockCursorRow.active);
+        });
+        settings.connect('changed::lock-cursor', () => {
+            lockCursorRow.active = settings.get_boolean('lock-cursor');
+        });
+
+        const autoResetRow = new Adw.SpinRow({
+            title: _('Auto Reset (seconds)'),
+            subtitle: _('Seconds of inactivity before the password clears (0 = never)'),
+            adjustment: new Gtk.Adjustment({
+                lower: 0,
+                upper: 3600,
+                step_increment: 1,
+                page_increment: 10,
+            }),
+            value: settings.get_uint('auto-reset-seconds'),
+        });
+        featuresGroup.add(autoResetRow);
+
+        autoResetRow.connect('notify::value', () => {
+            const value = Math.max(0, Math.round(autoResetRow.value));
+            settings.set_uint('auto-reset-seconds', value);
+        });
+        settings.connect('changed::auto-reset-seconds', () => {
+            autoResetRow.value = settings.get_uint('auto-reset-seconds');
+        });
+
+        // Cursor group
+        const cursorGroup = new Adw.PreferencesGroup({
+            title: _('Cursor'),
+            description: _('Customize the lock cursor appearance'),
+            sensitive: settings.get_boolean('lock-cursor'),
+        });
+        page.add(cursorGroup);
+
+        settings.connect('changed::lock-cursor', () => {
+            cursorGroup.sensitive = settings.get_boolean('lock-cursor');
+        });
+
+        const cursorBitmapRow = new Adw.EntryRow({
+            title: _('Cursor Bitmap'),
+            text: settings.get_string('cursor-bitmap-path'),
+        });
+        cursorBitmapRow.set_tooltip_text(_('Optional image path (PNG/SVG). Leave blank to use the built-in cursor.'));
+        cursorGroup.add(cursorBitmapRow);
+
+        cursorBitmapRow.connect('notify::text', () => {
+            settings.set_string('cursor-bitmap-path', cursorBitmapRow.text.trim());
+        });
+        settings.connect('changed::cursor-bitmap-path', () => {
+            cursorBitmapRow.text = settings.get_string('cursor-bitmap-path');
+        });
+
+        const browseCursorBitmapButton = new Gtk.Button({
+            icon_name: 'folder-open-symbolic',
+            valign: Gtk.Align.CENTER,
+            css_classes: ['flat'],
+            tooltip_text: _('Browse...'),
+        });
+        cursorBitmapRow.add_suffix(browseCursorBitmapButton);
+
+        const clearCursorBitmapButton = new Gtk.Button({
+            icon_name: 'edit-clear-symbolic',
+            valign: Gtk.Align.CENTER,
+            css_classes: ['flat'],
+            tooltip_text: _('Clear'),
+        });
+        cursorBitmapRow.add_suffix(clearCursorBitmapButton);
+
+        browseCursorBitmapButton.connect('clicked', async () => {
+            try {
+                const dialog = new Gtk.FileDialog({
+                    title: _('Select Cursor Image'),
+                });
+                const file = await dialog.open(window, null);
+                if (!file)
+                    return;
+
+                const path = file.get_path();
+                if (path) {
+                    settings.set_string('cursor-bitmap-path', path);
+                } else {
+                    settings.set_string('cursor-bitmap-path', file.get_uri());
+                }
+            } catch (e) {
+                // Cancelled or failed - ignore
+            }
+        });
+
+        clearCursorBitmapButton.connect('clicked', () => {
+            settings.set_string('cursor-bitmap-path', '');
+        });
+
+        const fgRow = new Adw.ActionRow({
+            title: _('Cursor Foreground'),
+            subtitle: _('Outline/details color (built-in cursor only)'),
+        });
+        const fgButton = new Gtk.ColorDialogButton({
+            dialog: new Gtk.ColorDialog({ with_alpha: true }),
+            rgba: bytesToRgba(getRgbaBytes('cursor-fg-rgba', [0, 0, 0, 255])),
+            valign: Gtk.Align.CENTER,
+        });
+        fgRow.add_suffix(fgButton);
+        fgRow.activatable_widget = fgButton;
+        cursorGroup.add(fgRow);
+
+        fgButton.connect('notify::rgba', () => {
+            setRgbaBytes('cursor-fg-rgba', rgbaToBytes(fgButton.rgba));
+        });
+        settings.connect('changed::cursor-fg-rgba', () => {
+            fgButton.rgba = bytesToRgba(getRgbaBytes('cursor-fg-rgba', [0, 0, 0, 255]));
+        });
+
+        const bgRow = new Adw.ActionRow({
+            title: _('Cursor Background'),
+            subtitle: _('Fill color (built-in cursor only)'),
+        });
+        const bgButton = new Gtk.ColorDialogButton({
+            dialog: new Gtk.ColorDialog({ with_alpha: true }),
+            rgba: bytesToRgba(getRgbaBytes('cursor-bg-rgba', [255, 255, 255, 255])),
+            valign: Gtk.Align.CENTER,
+        });
+        bgRow.add_suffix(bgButton);
+        bgRow.activatable_widget = bgButton;
+        cursorGroup.add(bgRow);
+
+        bgButton.connect('notify::rgba', () => {
+            setRgbaBytes('cursor-bg-rgba', rgbaToBytes(bgButton.rgba));
+        });
+        settings.connect('changed::cursor-bg-rgba', () => {
+            bgButton.rgba = bytesToRgba(getRgbaBytes('cursor-bg-rgba', [255, 255, 255, 255]));
+        });
+
         // Debug group
         const debugGroup = new Adw.PreferencesGroup({
             title: _('Debug'),
@@ -92,7 +321,7 @@ export default class StealthLockPreferences extends ExtensionPreferences {
 
         const debugModeRow = new Adw.SwitchRow({
             title: _('Enable Debug Mode'),
-            subtitle: _('Shows debug info and enables abort unlock hotkey'),
+            subtitle: _('Enables extra logging and an emergency abort hotkey'),
             active: settings.get_boolean('debug-mode'),
         });
         debugGroup.add(debugModeRow);
@@ -100,20 +329,40 @@ export default class StealthLockPreferences extends ExtensionPreferences {
         debugModeRow.connect('notify::active', () => {
             settings.set_boolean('debug-mode', debugModeRow.active);
         });
-
         settings.connect('changed::debug-mode', () => {
             debugModeRow.active = settings.get_boolean('debug-mode');
         });
 
+        const debugShowInfoRow = new Adw.SwitchRow({
+            title: _('Show Debug Info'),
+            subtitle: _('Show an on-screen debug overlay while locked'),
+            active: settings.get_boolean('debug-show-info'),
+            sensitive: settings.get_boolean('debug-mode'),
+        });
+        debugGroup.add(debugShowInfoRow);
+
+        debugShowInfoRow.connect('notify::active', () => {
+            settings.set_boolean('debug-show-info', debugShowInfoRow.active);
+        });
+        settings.connect('changed::debug-show-info', () => {
+            debugShowInfoRow.active = settings.get_boolean('debug-show-info');
+        });
+
+        const abortUseLockHotkeyRow = new Adw.SwitchRow({
+            title: _('Abort Hotkey = Lock Hotkey'),
+            subtitle: _('Use the same shortcut for abort while locked'),
+            active: settings.get_boolean('debug-abort-use-lock-hotkey'),
+            sensitive: settings.get_boolean('debug-mode'),
+        });
+        debugGroup.add(abortUseLockHotkeyRow);
+
         const abortHotkeyRow = new Adw.ActionRow({
             title: _('Abort Hotkey (Debug)'),
             subtitle: _('Unlocks without password when Debug Mode is enabled'),
-            sensitive: settings.get_boolean('debug-mode'),
         });
 
-        const currentAbortHotkey = settings.get_strv('debug-abort-hotkey')[0] || '<Control><Alt><Shift>u';
         const abortShortcutLabel = new Gtk.ShortcutLabel({
-            accelerator: currentAbortHotkey,
+            accelerator: getHotkey('debug-abort-hotkey', DEFAULT_ABORT_HOTKEY),
             valign: Gtk.Align.CENTER,
         });
         abortHotkeyRow.add_suffix(abortShortcutLabel);
@@ -135,53 +384,76 @@ export default class StealthLockPreferences extends ExtensionPreferences {
 
         debugGroup.add(abortHotkeyRow);
 
+        const syncAbortHotkeyUi = () => {
+            const debugEnabled = settings.get_boolean('debug-mode');
+            const useLock = settings.get_boolean('debug-abort-use-lock-hotkey');
+            const lockAccel = getHotkey('lock-hotkey', DEFAULT_LOCK_HOTKEY);
+            const abortAccel = getHotkey('debug-abort-hotkey', DEFAULT_ABORT_HOTKEY);
+
+            debugShowInfoRow.sensitive = debugEnabled;
+            abortUseLockHotkeyRow.sensitive = debugEnabled;
+
+            abortHotkeyRow.sensitive = debugEnabled && !useLock;
+            abortEditButton.sensitive = debugEnabled && !useLock;
+            abortClearButton.sensitive = debugEnabled && !useLock;
+
+            abortShortcutLabel.accelerator = useLock ? lockAccel : abortAccel;
+        };
+
+        abortUseLockHotkeyRow.connect('notify::active', () => {
+            settings.set_boolean('debug-abort-use-lock-hotkey', abortUseLockHotkeyRow.active);
+
+            const lockAccel = getHotkey('lock-hotkey', DEFAULT_LOCK_HOTKEY);
+            if (abortUseLockHotkeyRow.active) {
+                // Preserve the current custom abort hotkey, then force abort to match lock.
+                settings.set_strv('debug-abort-hotkey-custom', [getHotkey('debug-abort-hotkey', DEFAULT_ABORT_HOTKEY)]);
+                setHotkey('debug-abort-hotkey', lockAccel);
+            } else {
+                // Restore previous custom abort hotkey.
+                setHotkey('debug-abort-hotkey', getHotkey('debug-abort-hotkey-custom', DEFAULT_ABORT_HOTKEY));
+            }
+
+            syncAbortHotkeyUi();
+        });
+
+        settings.connect('changed::debug-mode', syncAbortHotkeyUi);
+        settings.connect('changed::debug-abort-use-lock-hotkey', () => {
+            const useLock = settings.get_boolean('debug-abort-use-lock-hotkey');
+            if (!useLock) {
+                const lockAccel = getHotkey('lock-hotkey', DEFAULT_LOCK_HOTKEY);
+                const abortAccel = getHotkey('debug-abort-hotkey', DEFAULT_ABORT_HOTKEY);
+                const customAccel = getHotkey('debug-abort-hotkey-custom', DEFAULT_ABORT_HOTKEY);
+                if (abortAccel === lockAccel && customAccel !== lockAccel)
+                    setHotkey('debug-abort-hotkey', customAccel);
+            }
+            syncAbortHotkeyUi();
+        });
+        settings.connect('changed::debug-abort-hotkey', () => {
+            const useLock = settings.get_boolean('debug-abort-use-lock-hotkey');
+            if (!useLock)
+                settings.set_strv('debug-abort-hotkey-custom', [getHotkey('debug-abort-hotkey', DEFAULT_ABORT_HOTKEY)]);
+            syncAbortHotkeyUi();
+        });
+        settings.connect('changed::lock-hotkey', () => {
+            const useLock = settings.get_boolean('debug-abort-use-lock-hotkey');
+            if (useLock)
+                setHotkey('debug-abort-hotkey', getHotkey('lock-hotkey', DEFAULT_LOCK_HOTKEY));
+            syncAbortHotkeyUi();
+        });
+
+        settings.connect('changed::debug-show-info', syncAbortHotkeyUi);
+        settings.connect('changed::debug-abort-hotkey-custom', syncAbortHotkeyUi);
+
+        syncAbortHotkeyUi();
+
         abortEditButton.connect('clicked', () => {
             this._showHotkeyDialog(window, settings, 'debug-abort-hotkey', abortShortcutLabel);
         });
 
         abortClearButton.connect('clicked', () => {
-            const defaultHotkey = '<Control><Alt><Shift>u';
-            settings.set_strv('debug-abort-hotkey', [defaultHotkey]);
-            abortShortcutLabel.accelerator = defaultHotkey;
+            setHotkey('debug-abort-hotkey', DEFAULT_ABORT_HOTKEY);
+            abortShortcutLabel.accelerator = DEFAULT_ABORT_HOTKEY;
         });
-
-        settings.connect('changed::debug-abort-hotkey', () => {
-            const hotkey = settings.get_strv('debug-abort-hotkey')[0] || '<Control><Alt><Shift>u';
-            abortShortcutLabel.accelerator = hotkey;
-        });
-
-        settings.connect('changed::debug-mode', () => {
-            abortHotkeyRow.sensitive = settings.get_boolean('debug-mode');
-        });
-
-        // Create info group
-        const infoGroup = new Adw.PreferencesGroup({
-            title: _('How It Works'),
-            description: _('Stealth Lock provides an invisible screen lock'),
-        });
-        page.add(infoGroup);
-        
-        // Info rows
-        const infoItems = [
-            { title: _('Freeze Display'), subtitle: _('Captures a screenshot of all monitors as an overlay') },
-            { title: _('Pause Media'), subtitle: _('Automatically pauses all playing media (MPRIS)') },
-            { title: _('Lock Cursor'), subtitle: _('Mouse cursor changes to a lock icon') },
-            { title: _('Invisible Password'), subtitle: _('Type your password blindly and press Enter') },
-            { title: _('Auto Reset'), subtitle: _('Password resets after 5 seconds of inactivity') },
-        ];
-        
-        for (const item of infoItems) {
-            const row = new Adw.ActionRow({
-                title: item.title,
-                subtitle: item.subtitle,
-            });
-            const icon = new Gtk.Image({
-                icon_name: 'emblem-ok-symbolic',
-                valign: Gtk.Align.CENTER,
-            });
-            row.add_prefix(icon);
-            infoGroup.add(row);
-        }
         
         // Warning group
         const warningGroup = new Adw.PreferencesGroup({

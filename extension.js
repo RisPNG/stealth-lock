@@ -27,7 +27,7 @@ import { Extension } from 'resource:///org/gnome/shell/extensions/extension.js';
 const MPRIS_PREFIX = 'org.mpris.MediaPlayer2.';
 const MPRIS_PATH = '/org/mpris/MediaPlayer2';
 const MPRIS_PLAYER_INTERFACE = 'org.mpris.MediaPlayer2.Player';
-const PASSWORD_RESET_TIMEOUT = 5000; // 5 seconds in milliseconds
+const DEFAULT_AUTO_RESET_SECONDS = 5;
 const SCREENSHOT_TIMEOUT_MS = 3000;
 const AUTH_TIMEOUT_MS = 10000;
 
@@ -350,6 +350,7 @@ export default class StealthLockExtension extends Extension {
         this._passwordResetTimeoutId = null;
         this._capturedEventHandlerId = null;
         this._pausedPlayers = [];
+        this._didPauseMedia = false;
         this._cursorTracker = null;
         this._cursorInhibited = false;
         this._settings = null;
@@ -365,6 +366,7 @@ export default class StealthLockExtension extends Extension {
         this._lastCursorStagePos = null;
         this._lastCursorLocalPos = null;
         this._lastDebugCursorLabelUpdate = 0;
+        this._abortHotkeySyncing = false;
     }
     
     enable() {
@@ -379,13 +381,29 @@ export default class StealthLockExtension extends Extension {
             this._toggleLock.bind(this)
         );
 
+        this._syncAbortHotkeySettings();
         this._syncDebugKeybindings();
 
         this._settingsChangedIds.push(
             this._settings.connect('changed::debug-mode', () => this._syncDebugKeybindings())
         );
         this._settingsChangedIds.push(
-            this._settings.connect('changed::debug-abort-hotkey', () => this._syncDebugKeybindings())
+            this._settings.connect('changed::debug-abort-hotkey', () => {
+                this._syncDebugKeybindings();
+                this._syncAbortHotkeyCustomFromAbort();
+            })
+        );
+        this._settingsChangedIds.push(
+            this._settings.connect('changed::debug-abort-use-lock-hotkey', () => this._syncAbortHotkeySettings())
+        );
+        this._settingsChangedIds.push(
+            this._settings.connect('changed::debug-abort-hotkey-custom', () => this._syncAbortHotkeySettings())
+        );
+        this._settingsChangedIds.push(
+            this._settings.connect('changed::lock-hotkey', () => this._syncAbortHotkeySettings())
+        );
+        this._settingsChangedIds.push(
+            this._settings.connect('changed::debug-show-info', () => this._syncDebugOverlay())
         );
         
         console.log('Stealth Lock extension enabled');
@@ -419,6 +437,97 @@ export default class StealthLockExtension extends Extension {
             return !!this._settings?.get_boolean('debug-mode');
         } catch (e) {
             return false;
+        }
+    }
+
+    _shouldShowDebugInfo() {
+        if (!this._isDebugMode())
+            return false;
+
+        try {
+            return !!this._settings?.get_boolean('debug-show-info');
+        } catch (e) {
+            return true;
+        }
+    }
+
+    _shouldFreezeDisplay() {
+        try {
+            return !!this._settings?.get_boolean('freeze-display');
+        } catch (e) {
+            return true;
+        }
+    }
+
+    _shouldPauseMedia() {
+        try {
+            return !!this._settings?.get_boolean('pause-media');
+        } catch (e) {
+            return true;
+        }
+    }
+
+    _shouldLockCursor() {
+        try {
+            return !!this._settings?.get_boolean('lock-cursor');
+        } catch (e) {
+            return true;
+        }
+    }
+
+    _getHotkeyAccel(key, fallback) {
+        try {
+            return this._settings?.get_strv(key)?.[0] || fallback;
+        } catch (e) {
+            return fallback;
+        }
+    }
+
+    _syncAbortHotkeyCustomFromAbort() {
+        if (!this._settings || this._abortHotkeySyncing)
+            return;
+
+        try {
+            const useLock = !!this._settings.get_boolean('debug-abort-use-lock-hotkey');
+            if (useLock)
+                return;
+
+            const abortAccel = this._getHotkeyAccel('debug-abort-hotkey', '<Control><Alt><Shift>u');
+            const customAccel = this._getHotkeyAccel('debug-abort-hotkey-custom', '<Control><Alt><Shift>u');
+            if (abortAccel && abortAccel !== customAccel)
+                this._settings.set_strv('debug-abort-hotkey-custom', [abortAccel]);
+        } catch (e) {
+            // Ignore sync errors
+        }
+    }
+
+    _syncAbortHotkeySettings() {
+        if (!this._settings || this._abortHotkeySyncing)
+            return;
+
+        this._abortHotkeySyncing = true;
+        try {
+            const useLock = !!this._settings.get_boolean('debug-abort-use-lock-hotkey');
+            const lockAccel = this._getHotkeyAccel('lock-hotkey', '<Super><Control>l');
+            const currentAbort = this._getHotkeyAccel('debug-abort-hotkey', '<Control><Alt><Shift>u');
+            const customAbort = this._getHotkeyAccel('debug-abort-hotkey-custom', '<Control><Alt><Shift>u');
+
+            if (useLock) {
+                if (lockAccel && currentAbort !== lockAccel)
+                    this._settings.set_strv('debug-abort-hotkey', [lockAccel]);
+            } else {
+                // If we just toggled off "use lock hotkey", restore the previous custom abort hotkey.
+                if (lockAccel && currentAbort === lockAccel && customAbort && customAbort !== lockAccel) {
+                    this._settings.set_strv('debug-abort-hotkey', [customAbort]);
+                } else if (currentAbort && currentAbort !== customAbort) {
+                    // Otherwise keep the custom key tracking the current value (upgrade-safe).
+                    this._settings.set_strv('debug-abort-hotkey-custom', [currentAbort]);
+                }
+            }
+        } catch (e) {
+            // Ignore sync errors
+        } finally {
+            this._abortHotkeySyncing = false;
         }
     }
 
@@ -463,16 +572,21 @@ export default class StealthLockExtension extends Extension {
         this._debugAbortSequenceCount = 0;
         this._debugAbortSequenceLastTime = 0;
         this._lastAuthExitCode = null;
+        this._didPauseMedia = false;
         
         console.log('Stealth Lock: Locking...');
 
         try {
             // 1. Pause all media players via MPRIS
-            await this._pauseAllMedia();
+            if (this._shouldPauseMedia()) {
+                this._didPauseMedia = true;
+                await this._pauseAllMedia();
+            }
 
             // 2. Create the overlay and capture screenshots
             this._overlay = new StealthLockOverlay(this);
-            await this._overlay.captureScreens();
+            if (this._shouldFreezeDisplay())
+                await this._overlay.captureScreens();
 
             // 3. Add overlay to the stage at the top
             if (Main.layoutManager.addTopChrome)
@@ -489,7 +603,7 @@ export default class StealthLockExtension extends Extension {
             });
 
             // Debug overlay (optional)
-            if (this._isDebugMode()) {
+            if (this._shouldShowDebugInfo()) {
                 this._debugLabel = new St.Label({
                     style: 'color: #fff; background-color: rgba(0,0,0,0.70); padding: 8px; border-radius: 6px; font-family: monospace; font-size: 12px;',
                     text: '',
@@ -500,7 +614,8 @@ export default class StealthLockExtension extends Extension {
             }
             
             // 5. Change cursor to lock icon
-            this._setLockCursor();
+            if (this._shouldLockCursor())
+                this._setLockCursor();
             
             // 6. Grab keyboard input
             this._grabKeyboard();
@@ -550,7 +665,8 @@ export default class StealthLockExtension extends Extension {
         this._debugLabel = null;
         
         // 5. Resume media players
-        this._resumeAllMedia();
+        if (this._didPauseMedia)
+            this._resumeAllMedia();
         
         // 6. Clear password buffer and timeout
         this._passwordBuffer = '';
@@ -722,7 +838,7 @@ export default class StealthLockExtension extends Extension {
     }
 
     _updateDebugLabel(extraLine = null) {
-        if (!this._debugLabel || !this._isDebugMode())
+        if (!this._debugLabel || !this._shouldShowDebugInfo())
             return;
 
         const abortAccel = (() => {
@@ -766,10 +882,21 @@ export default class StealthLockExtension extends Extension {
     
     _resetPasswordTimeout() {
         this._clearPasswordResetTimeout();
-        
+
+        const seconds = (() => {
+            try {
+                return this._settings?.get_uint('auto-reset-seconds') ?? DEFAULT_AUTO_RESET_SECONDS;
+            } catch (e) {
+                return DEFAULT_AUTO_RESET_SECONDS;
+            }
+        })();
+
+        if (!seconds)
+            return;
+
         this._passwordResetTimeoutId = GLib.timeout_add(
             GLib.PRIORITY_DEFAULT,
-            PASSWORD_RESET_TIMEOUT,
+            seconds * 1000,
             () => {
                 console.log('Stealth Lock: Password reset due to inactivity');
                 this._passwordBuffer = '';
@@ -909,12 +1036,43 @@ export default class StealthLockExtension extends Extension {
                 this._cursorSize = 32;
             }
 
+            const customBitmapUri = (() => {
+                let bitmap = '';
+                try {
+                    bitmap = this._settings?.get_string('cursor-bitmap-path')?.trim() ?? '';
+                } catch (e) {
+                    bitmap = '';
+                }
+                if (!bitmap)
+                    return '';
+
+                try {
+                    const file = bitmap.includes('://')
+                        ? Gio.File.new_for_uri(bitmap)
+                        : Gio.File.new_for_path(bitmap);
+                    if (!file.query_exists(null))
+                        return '';
+                    return file.get_uri();
+                } catch (e) {
+                    return '';
+                }
+            })();
+
             const cursorHeight = this._cursorSize;
-            const cursorWidth = Math.max(1, Math.round((LOCK_CURSOR_XBM.width * cursorHeight) / LOCK_CURSOR_XBM.height));
-            const scaleX = cursorWidth / LOCK_CURSOR_XBM.width;
-            const scaleY = cursorHeight / LOCK_CURSOR_XBM.height;
-            this._cursorHotX = Math.round(LOCK_CURSOR_XBM.hotX * scaleX);
-            this._cursorHotY = Math.round(LOCK_CURSOR_XBM.hotY * scaleY);
+            const usingCustomBitmap = !!customBitmapUri;
+            const cursorWidth = usingCustomBitmap
+                ? cursorHeight
+                : Math.max(1, Math.round((LOCK_CURSOR_XBM.width * cursorHeight) / LOCK_CURSOR_XBM.height));
+
+            if (usingCustomBitmap) {
+                this._cursorHotX = Math.round(cursorWidth / 2);
+                this._cursorHotY = Math.round(cursorHeight / 2);
+            } else {
+                const scaleX = cursorWidth / LOCK_CURSOR_XBM.width;
+                const scaleY = cursorHeight / LOCK_CURSOR_XBM.height;
+                this._cursorHotX = Math.round(LOCK_CURSOR_XBM.hotX * scaleX);
+                this._cursorHotY = Math.round(LOCK_CURSOR_XBM.hotY * scaleY);
+            }
 
             // Create cursor widget — added to the overlay so it renders above
             // the frozen screenshots.
@@ -924,53 +1082,77 @@ export default class StealthLockExtension extends Extension {
                 reactive: false,
             });
 
-            // Generate cursor image from embedded XBM cursor bitmaps.
-            try {
-                const rgba = _renderXbmCursorRgba(
-                    LOCK_CURSOR_XBM,
-                    cursorWidth,
-                    cursorHeight,
-                    {
-                        // Two-tone cursor for visibility on any background.
-                        // Source bit 1 is the outline/details; source bit 0 is the fill.
-                        fg: [0, 0, 0, 255],         // black outline
-                        bg: [255, 255, 255, 255],   // white fill
-                    }
-                );
-                const rowstride = cursorWidth * 4;
+            if (usingCustomBitmap) {
+                this._cursorActor.style = [
+                    `background-image: url("${customBitmapUri}");`,
+                    'background-repeat: no-repeat;',
+                    'background-position: center;',
+                    'background-size: contain;',
+                ].join(' ');
+                console.log('Stealth Lock: Cursor set from custom bitmap');
+            } else {
+                // Generate cursor image from embedded XBM cursor bitmaps.
+                try {
+                    const readRgba = (key, fallback) => {
+                        try {
+                            const unpacked = this._settings?.get_value(key)?.deep_unpack?.();
+                            if (!Array.isArray(unpacked) || unpacked.length !== 4)
+                                return fallback;
+                            return unpacked.map((v, i) => {
+                                const n = Number(v);
+                                if (!Number.isFinite(n))
+                                    return fallback[i];
+                                return Math.max(0, Math.min(255, Math.round(n)));
+                            });
+                        } catch (e) {
+                            return fallback;
+                        }
+                    };
 
-                // Prefer St.ImageContent when available (GNOME 46+), since it's
-                // what GNOME Shell uses internally for raw pixel uploads.
-                if (St.ImageContent?.new_with_preferred_size) {
-                    const image = St.ImageContent.new_with_preferred_size(cursorWidth, cursorHeight);
-                    const coglCtx = global.stage.context.get_backend().get_cogl_context();
-                    image.set_data(
-                        coglCtx,
-                        rgba,
-                        Cogl.PixelFormat.RGBA_8888,
+                    const rgba = _renderXbmCursorRgba(
+                        LOCK_CURSOR_XBM,
                         cursorWidth,
                         cursorHeight,
-                        rowstride
+                        {
+                            fg: readRgba('cursor-fg-rgba', [0, 0, 0, 255]),
+                            bg: readRgba('cursor-bg-rgba', [255, 255, 255, 255]),
+                        }
                     );
-                    this._cursorActor.set_content(image);
-                } else {
-                    const image = new Clutter.Image();
-                    image.set_data(
-                        rgba,
-                        Cogl.PixelFormat.RGBA_8888,
-                        cursorWidth,
-                        cursorHeight,
-                        rowstride
-                    );
-                    this._cursorActor.set_content(image);
+                    const rowstride = cursorWidth * 4;
+
+                    // Prefer St.ImageContent when available (GNOME 46+), since it's
+                    // what GNOME Shell uses internally for raw pixel uploads.
+                    if (St.ImageContent?.new_with_preferred_size) {
+                        const image = St.ImageContent.new_with_preferred_size(cursorWidth, cursorHeight);
+                        const coglCtx = global.stage.context.get_backend().get_cogl_context();
+                        image.set_data(
+                            coglCtx,
+                            rgba,
+                            Cogl.PixelFormat.RGBA_8888,
+                            cursorWidth,
+                            cursorHeight,
+                            rowstride
+                        );
+                        this._cursorActor.set_content(image);
+                    } else {
+                        const image = new Clutter.Image();
+                        image.set_data(
+                            rgba,
+                            Cogl.PixelFormat.RGBA_8888,
+                            cursorWidth,
+                            cursorHeight,
+                            rowstride
+                        );
+                        this._cursorActor.set_content(image);
+                    }
+                    this._cursorActor.set_content_gravity(Clutter.ContentGravity.RESIZE_FILL);
+                    console.log('Stealth Lock: Cursor generated from embedded XBM');
+                } catch (imgErr) {
+                    console.warn('Stealth Lock: Cursor generation failed:', imgErr?.stack ?? imgErr?.message ?? imgErr);
+                    this._cursorActor.style = 'background-color: rgba(0,120,212,0.8); border-radius: 50%;';
+                    this._cursorHotX = Math.round(cursorWidth / 2);
+                    this._cursorHotY = Math.round(cursorHeight / 2);
                 }
-                this._cursorActor.set_content_gravity(Clutter.ContentGravity.RESIZE_FILL);
-                console.log('Stealth Lock: Cursor generated from embedded XBM');
-            } catch (imgErr) {
-                console.warn('Stealth Lock: Cursor generation failed:', imgErr?.stack ?? imgErr?.message ?? imgErr);
-                this._cursorActor.style = 'background-color: rgba(0,120,212,0.8); border-radius: 50%;';
-                this._cursorHotX = Math.round(cursorWidth / 2);
-                this._cursorHotY = Math.round(cursorHeight / 2);
             }
 
             // Add cursor to overlay (last child = renders on top of screenshots)
@@ -1030,6 +1212,30 @@ export default class StealthLockExtension extends Extension {
             
         } catch (e) {
             console.error('Failed to set custom cursor:', e);
+        }
+    }
+
+    _syncDebugOverlay() {
+        if (!this._locked || !this._overlay)
+            return;
+
+        if (this._shouldShowDebugInfo()) {
+            if (this._debugLabel)
+                return;
+
+            this._debugLabel = new St.Label({
+                style: 'color: #fff; background-color: rgba(0,0,0,0.70); padding: 8px; border-radius: 6px; font-family: monospace; font-size: 12px;',
+                text: '',
+            });
+            this._debugLabel.set_position(12, 12);
+            this._overlay.add_child(this._debugLabel);
+            this._updateDebugLabel();
+            return;
+        }
+
+        if (this._debugLabel) {
+            this._debugLabel.destroy();
+            this._debugLabel = null;
         }
     }
     
