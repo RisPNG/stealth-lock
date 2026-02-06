@@ -41,6 +41,8 @@ const CITY_PROP_BRANCH_TO_MAIN = 1; // %
 const CITY_BRANCH_FALLOFF = 50;
 const CITY_MAX_STEPS_BACK = 300;
 const CITY_LAND_EXPAND_WEIGHT = 10;
+const CITY_BRANCH_SPEED_MULTIPLIER = 1.2; // 1.2 => per-branch speed range is ~0.83x .. 1.2x
+const CITY_BRANCH_MAX_SUBSTEPS_PER_TICK = 3; // safety cap for very high multipliers
 
 // Palette-based color knobs (no hue-gradient maze coloring)
 const CITY_PALETTE = [
@@ -56,7 +58,7 @@ const CITY_COLOR_JITTER = 0.10;
 const CITY_COLOR_SHIFT_ON_NEW_MAIN = 1;
 
 // Animation knob
-const ANIMATION_INTERVAL_MS = 40;
+const ANIMATION_INTERVAL_MS = 50;
 
 // Clock knobs
 const SHOW_CLOCK = true;
@@ -159,6 +161,13 @@ if (ctx.event === 'init') {
     return list[randomInt(list.length)];
   }
 
+  function getBranchSpeedFactor() {
+    const mult = Math.max(1, Number(CITY_BRANCH_SPEED_MULTIPLIER) || 1);
+    const min = 1 / mult;
+    const max = mult;
+    return min + Math.random() * (max - min);
+  }
+
   class Pos {
     constructor(x, y) {
       this.x = x;
@@ -204,6 +213,8 @@ if (ctx.event === 'init') {
       this.paletteIndex = randomInt(Math.max(1, CITY_PALETTE.length));
       this.brightness = CITY_MAIN_BRIGHTNESS;
       this.jitter = (Math.random() * 2 - 1) * CITY_COLOR_JITTER;
+      this.speedFactor = getBranchSpeedFactor();
+      this.stepCarry = 0;
       this.history = [];
     }
 
@@ -472,10 +483,11 @@ if (ctx.event === 'init') {
       const scaledBranchOffLand = CITY_PROP_BRANCH_OFF_LAND
         * (1.0 + CITY_BRANCH_FALLOFF)
         / (CITY_BRANCH_FALLOFF + Math.max(1, branchList.length));
+      const speedScale = Math.max(0.05, oldBranch.speedFactor || 1);
 
       const canBranch = (
-        (oldBranch.mode === 'CITY' && Math.random() <= scaledBranchOff / 100.0)
-        || (oldBranch.mode === 'LAND' && Math.random() <= scaledBranchOffLand / 100.0)
+        (oldBranch.mode === 'CITY' && Math.random() <= (scaledBranchOff * speedScale) / 100.0)
+        || (oldBranch.mode === 'LAND' && Math.random() <= (scaledBranchOffLand * speedScale) / 100.0)
       );
 
       if (!canBranch)
@@ -492,7 +504,23 @@ if (ctx.event === 'init') {
     }
 
     branchList = branchList.filter(branch => {
-      branch.drawMove();
+      const speed = Math.max(0.05, branch.speedFactor || 1);
+      branch.stepCarry = (branch.stepCarry || 0) + speed;
+
+      let n = 0;
+      while (
+        branch.state === 'RUNNING'
+        && branch.stepCarry >= 1
+        && n < Math.max(1, CITY_BRANCH_MAX_SUBSTEPS_PER_TICK)
+      ) {
+        branch.stepCarry -= 1;
+        branch.drawMove();
+        n++;
+      }
+
+      const carryCap = Math.max(2, CITY_BRANCH_MAX_SUBSTEPS_PER_TICK + 1);
+      if (branch.stepCarry > carryCap)
+        branch.stepCarry = carryCap;
       return branch.state === 'RUNNING';
     });
 
