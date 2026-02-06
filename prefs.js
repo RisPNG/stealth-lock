@@ -85,6 +85,8 @@ export default class StealthLockPreferences extends ExtensionPreferences {
 
         const DEFAULT_LOCK_HOTKEY = '<Super><Control>l';
         const DEFAULT_ABORT_HOTKEY = '<Control><Alt><Shift>u';
+        const CURSOR_MODE_VALUES = ['lock-icon', 'normal', 'hidden'];
+        const CURSOR_MODE_LABELS = [_('Lock Icon'), _('Normal Cursor'), _('No Cursor')];
 
         const getHotkey = (key, fallback) => {
             try {
@@ -97,6 +99,71 @@ export default class StealthLockPreferences extends ExtensionPreferences {
         const setHotkey = (key, accel) => {
             settings.set_strv(key, [accel]);
         };
+
+        const normalizeCursorMode = (mode) => {
+            if (CURSOR_MODE_VALUES.includes(mode))
+                return mode;
+            if (mode === 'none' || mode === 'no-cursor')
+                return 'hidden';
+            return 'lock-icon';
+        };
+
+        const getLegacyLockCursor = () => {
+            try {
+                return settings.get_boolean('lock-cursor');
+            } catch (e) {
+                return true;
+            }
+        };
+
+        const getCursorMode = () => {
+            try {
+                const mode = settings.get_string('cursor-mode')?.trim() ?? '';
+                if (CURSOR_MODE_VALUES.includes(mode))
+                    return mode;
+            } catch (e) {
+                // Fall through to legacy key
+            }
+
+            return getLegacyLockCursor() ? 'lock-icon' : 'normal';
+        };
+
+        const setCursorMode = (mode) => {
+            const normalized = normalizeCursorMode(mode);
+
+            try {
+                settings.set_string('cursor-mode', normalized);
+            } catch (e) {
+                // Ignore when running against older schema
+            }
+
+            // Keep legacy key in sync for downgrade compatibility.
+            try {
+                settings.set_boolean('lock-cursor', normalized === 'lock-icon');
+            } catch (e) {
+                // Ignore when legacy key is unavailable
+            }
+        };
+
+        const migrateLegacyCursorMode = () => {
+            // One-time migration: if cursor-mode has no user value yet but the
+            // old lock-cursor key does, map it to the new enum.
+            try {
+                const hasCursorModeUserValue = settings.get_user_value('cursor-mode') !== null;
+                if (hasCursorModeUserValue)
+                    return;
+
+                const hasLegacyUserValue = settings.get_user_value('lock-cursor') !== null;
+                if (!hasLegacyUserValue)
+                    return;
+
+                setCursorMode(getLegacyLockCursor() ? 'lock-icon' : 'normal');
+            } catch (e) {
+                // Ignore when user-value APIs/keys are unavailable
+            }
+        };
+
+        migrateLegacyCursorMode();
 
         const clampByte = (value, fallback) => {
             const n = Number(value);
@@ -171,19 +238,27 @@ export default class StealthLockPreferences extends ExtensionPreferences {
             pauseMediaRow.active = settings.get_boolean('pause-media');
         });
 
-        const lockCursorRow = new Adw.SwitchRow({
-            title: _('Lock Cursor'),
-            subtitle: _('Replace the cursor with a lock cursor while locked'),
-            active: settings.get_boolean('lock-cursor'),
+        const cursorModeModel = Gtk.StringList.new(CURSOR_MODE_LABELS);
+        const cursorModeRow = new Adw.ComboRow({
+            title: _('Cursor'),
+            subtitle: _('Choose lock icon, normal cursor, or no cursor while locked'),
+            model: cursorModeModel,
         });
-        featuresGroup.add(lockCursorRow);
+        featuresGroup.add(cursorModeRow);
 
-        lockCursorRow.connect('notify::active', () => {
-            settings.set_boolean('lock-cursor', lockCursorRow.active);
+        const syncCursorModeSelected = () => {
+            const mode = getCursorMode();
+            const idx = Math.max(0, CURSOR_MODE_VALUES.indexOf(mode));
+            cursorModeRow.selected = idx;
+        };
+        syncCursorModeSelected();
+
+        cursorModeRow.connect('notify::selected', () => {
+            const mode = CURSOR_MODE_VALUES[cursorModeRow.selected] ?? 'lock-icon';
+            setCursorMode(mode);
         });
-        settings.connect('changed::lock-cursor', () => {
-            lockCursorRow.active = settings.get_boolean('lock-cursor');
-        });
+        settings.connect('changed::cursor-mode', syncCursorModeSelected);
+        settings.connect('changed::lock-cursor', syncCursorModeSelected);
 
         const autoResetRow = new Adw.SpinRow({
             title: _('Auto Reset (seconds)'),
@@ -472,13 +547,15 @@ export default class StealthLockPreferences extends ExtensionPreferences {
         const cursorGroup = new Adw.PreferencesGroup({
             title: _('Cursor'),
             description: _('Customize the lock cursor appearance'),
-            sensitive: settings.get_boolean('lock-cursor'),
+            sensitive: getCursorMode() === 'lock-icon',
         });
         page.add(cursorGroup);
 
-        settings.connect('changed::lock-cursor', () => {
-            cursorGroup.sensitive = settings.get_boolean('lock-cursor');
-        });
+        const syncCursorGroupSensitivity = () => {
+            cursorGroup.sensitive = getCursorMode() === 'lock-icon';
+        };
+        settings.connect('changed::cursor-mode', syncCursorGroupSensitivity);
+        settings.connect('changed::lock-cursor', syncCursorGroupSensitivity);
 
         const cursorBitmapRow = new Adw.EntryRow({
             title: _('Cursor Bitmap'),

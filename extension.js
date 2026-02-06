@@ -31,6 +31,14 @@ const DEFAULT_AUTO_RESET_SECONDS = 5;
 const SCREENSHOT_TIMEOUT_MS = 3000;
 const AUTH_TIMEOUT_MS = 10000;
 const PASSWORD_BULLET = '\u2022';
+const CURSOR_MODE_LOCK_ICON = 'lock-icon';
+const CURSOR_MODE_NORMAL = 'normal';
+const CURSOR_MODE_HIDDEN = 'hidden';
+const VALID_CURSOR_MODES = new Set([
+    CURSOR_MODE_LOCK_ICON,
+    CURSOR_MODE_NORMAL,
+    CURSOR_MODE_HIDDEN,
+]);
 
 // Cursor bitmap embedded as XBM-style bitmaps (LSB-first per byte).
 // Source bitmap decides foreground/background within the mask.
@@ -367,6 +375,7 @@ export default class StealthLockExtension extends Extension {
         this._lastCursorStagePos = null;
         this._lastCursorLocalPos = null;
         this._lastDebugCursorLabelUpdate = 0;
+        this._activeCursorMode = CURSOR_MODE_LOCK_ICON;
         this._abortHotkeySyncing = false;
         this._abortOwnedLockBinding = false;
 
@@ -382,6 +391,7 @@ export default class StealthLockExtension extends Extension {
     
     enable() {
         this._settings = this.getSettings();
+        this._migrateLegacyCursorMode();
         
         // Register the keybinding
         Main.wm.addKeybinding(
@@ -492,11 +502,52 @@ export default class StealthLockExtension extends Extension {
         }
     }
 
-    _shouldLockCursor() {
+    _getLegacyLockCursorEnabled() {
         try {
             return !!this._settings?.get_boolean('lock-cursor');
         } catch (e) {
             return true;
+        }
+    }
+
+    _getCursorMode() {
+        try {
+            const mode = this._settings?.get_string('cursor-mode')?.trim() ?? '';
+            if (VALID_CURSOR_MODES.has(mode))
+                return mode;
+
+            if (mode === 'none' || mode === 'no-cursor')
+                return CURSOR_MODE_HIDDEN;
+        } catch (e) {
+            // Fall through to legacy boolean key
+        }
+
+        return this._getLegacyLockCursorEnabled()
+            ? CURSOR_MODE_LOCK_ICON
+            : CURSOR_MODE_NORMAL;
+    }
+
+    _migrateLegacyCursorMode() {
+        if (!this._settings)
+            return;
+
+        // One-time migration for existing users:
+        // if cursor-mode has no explicit user value, map legacy lock-cursor.
+        try {
+            const hasCursorModeUserValue = this._settings.get_user_value('cursor-mode') !== null;
+            if (hasCursorModeUserValue)
+                return;
+
+            const hasLegacyUserValue = this._settings.get_user_value('lock-cursor') !== null;
+            if (!hasLegacyUserValue)
+                return;
+
+            const mapped = this._getLegacyLockCursorEnabled()
+                ? CURSOR_MODE_LOCK_ICON
+                : CURSOR_MODE_NORMAL;
+            this._settings.set_string('cursor-mode', mapped);
+        } catch (e) {
+            // Ignore when keys/APIs are unavailable
         }
     }
 
@@ -676,9 +727,8 @@ export default class StealthLockExtension extends Extension {
                 this._updateDebugLabel();
             }
             
-            // 5. Change cursor to lock icon
-            if (this._shouldLockCursor())
-                this._setLockCursor();
+            // 5. Apply cursor mode
+            this._applyCursorMode();
 
             // Password prompt (optional) - add late so it renders on top
             this._syncPasswordPrompt();
@@ -716,6 +766,7 @@ export default class StealthLockExtension extends Extension {
 
         // 3. Restore cursor
         this._restoreCursor();
+        this._activeCursorMode = null;
 
         // 3b. Remove password prompt
         this._destroyPasswordPrompt();
@@ -1022,7 +1073,7 @@ export default class StealthLockExtension extends Extension {
             'Stealth Lock DEBUG',
             `bufferLen=${this._passwordBuffer.length}`,
             `authExit=${this._lastAuthExitCode ?? 'n/a'}`,
-            `cursor=${this._cursorActor ? 'yes' : 'no'} size=${this._cursorSize || 0}`,
+            `cursorMode=${this._activeCursorMode ?? 'n/a'} actor=${this._cursorActor ? 'yes' : 'no'} size=${this._cursorSize || 0}`,
             `cursorStage=${this._lastCursorStagePos ?? 'n/a'} local=${this._lastCursorLocalPos ?? 'n/a'}`,
             `abort=${abortAccel || 'n/a'} (and Esc x5)`,
         ];
@@ -1198,6 +1249,85 @@ export default class StealthLockExtension extends Extension {
             }
         });
     }
+
+    _applyCursorMode() {
+        const mode = this._getCursorMode();
+        this._activeCursorMode = mode;
+
+        if (mode === CURSOR_MODE_LOCK_ICON) {
+            this._setLockCursor();
+            return;
+        }
+
+        if (mode === CURSOR_MODE_HIDDEN) {
+            this._setHiddenCursor();
+            return;
+        }
+
+        // CURSOR_MODE_NORMAL: keep system cursor untouched.
+        console.log('Stealth Lock: Cursor mode=normal');
+    }
+
+    _setHiddenCursor() {
+        try {
+            this._ensureCursorTracker();
+            this._hideSystemCursor();
+            console.log('Stealth Lock: Cursor mode=hidden');
+        } catch (e) {
+            console.error('Stealth Lock: Failed to hide cursor:', e);
+        }
+    }
+
+    _ensureCursorTracker() {
+        if (this._cursorTracker)
+            return this._cursorTracker;
+
+        try {
+            if (global.backend?.get_cursor_tracker)
+                this._cursorTracker = global.backend.get_cursor_tracker();
+            else
+                this._cursorTracker = Meta.CursorTracker.get_for_display(global.display);
+        } catch (e) {
+            this._cursorTracker = null;
+        }
+
+        return this._cursorTracker;
+    }
+
+    _hideSystemCursor() {
+        const cursorTracker = this._ensureCursorTracker();
+        this._cursorInhibited = false;
+        this._previousPointerVisible = null;
+
+        if (cursorTracker?.get_pointer_visible && cursorTracker?.set_pointer_visible) {
+            try {
+                this._previousPointerVisible = cursorTracker.get_pointer_visible();
+            } catch (e) {
+                this._previousPointerVisible = null;
+            }
+
+            try {
+                cursorTracker.set_pointer_visible(false);
+                this._cursorInhibited = true;
+            } catch (e) {
+                // Ignore
+            }
+        } else if (cursorTracker?.inhibit_cursor_visibility) {
+            try {
+                cursorTracker.inhibit_cursor_visibility();
+                this._cursorInhibited = true;
+            } catch (e) {
+                // Ignore
+            }
+        }
+
+        try {
+            global.display.set_cursor(Meta.Cursor.NONE);
+            this._cursorInhibited = true;
+        } catch (e) {
+            // Ignore
+        }
+    }
     
     _setLockCursor() {
         try {
@@ -1331,42 +1461,16 @@ export default class StealthLockExtension extends Extension {
                 this._overlay.add_child(this._cursorActor);
             }
             
-            // Get cursor tracker and connect to position changes
-            if (global.backend?.get_cursor_tracker)
-                this._cursorTracker = global.backend.get_cursor_tracker();
-            else
-                this._cursorTracker = Meta.CursorTracker.get_for_display(global.display);
-            
-            // Hide the system cursor (try multiple strategies for robustness)
-            this._cursorInhibited = false;
-            this._previousPointerVisible = null;
-
-            if (this._cursorTracker?.get_pointer_visible && this._cursorTracker?.set_pointer_visible) {
-                try {
-                    this._previousPointerVisible = this._cursorTracker.get_pointer_visible();
-                } catch (e) {
-                    this._previousPointerVisible = null;
-                }
-
-                try {
-                    this._cursorTracker.set_pointer_visible(false);
-                    this._cursorInhibited = true;
-                } catch (e) {
-                    // Ignore
-                }
-            }
-
-            try {
-                global.display.set_cursor(Meta.Cursor.NONE);
-                this._cursorInhibited = true;
-            } catch (e) {
-                // Ignore
-            }
+            // Get cursor tracker and hide system cursor.
+            this._ensureCursorTracker();
+            this._hideSystemCursor();
             
             // Update custom cursor position
-            this._cursorMotionId = this._cursorTracker.connect('position-invalidated', () => {
-                this._updateCursorPosition();
-            });
+            if (this._cursorTracker) {
+                this._cursorMotionId = this._cursorTracker.connect('position-invalidated', () => {
+                    this._updateCursorPosition();
+                });
+            }
             
             // Also track stage motion events for smoother cursor
             this._stageMotionId = global.stage.connect('motion-event', (actor, event) => {
@@ -1554,8 +1658,8 @@ export default class StealthLockExtension extends Extension {
 
         // If _setLockCursor() already connected position-invalidated via
         // _cursorMotionId, _updateCursorPosition() will handle prompt updates
-        // too (we modified it above).  Still add a dedicated handler so prompt
-        // following works even when lock-cursor is disabled.
+        // too (we modified it above). Still add a dedicated handler so prompt
+        // following works for non-lock-icon cursor modes.
         if (this._cursorMotionId)
             return;
 

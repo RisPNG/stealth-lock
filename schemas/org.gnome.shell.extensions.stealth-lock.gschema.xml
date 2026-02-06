@@ -46,11 +46,21 @@
       </description>
     </key>
 
+    <key name="cursor-mode" type="s">
+      <default>'lock-icon'</default>
+      <summary>Cursor Mode</summary>
+      <description>
+        Cursor behavior while locked.
+        Valid values: "lock-icon" (show custom lock cursor), "normal" (leave system cursor),
+        "hidden" (hide cursor completely).
+      </description>
+    </key>
+
     <key name="lock-cursor" type="b">
       <default>true</default>
-      <summary>Lock Cursor</summary>
+      <summary>Lock Cursor (Legacy)</summary>
       <description>
-        When enabled, replaces the system cursor with a lock cursor while locked.
+        Legacy setting retained for migration compatibility with older versions.
       </description>
     </key>
 
