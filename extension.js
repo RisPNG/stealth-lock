@@ -368,6 +368,7 @@ export default class StealthLockExtension extends Extension {
         this._lastCursorLocalPos = null;
         this._lastDebugCursorLabelUpdate = 0;
         this._abortHotkeySyncing = false;
+        this._abortOwnedLockBinding = false;
 
         this._passwordPrompt = null;
         this._passwordPromptText = null;
@@ -420,9 +421,10 @@ export default class StealthLockExtension extends Extension {
     }
     
     disable() {
-        // Remove keybinding
+        // Remove keybindings
         Main.wm.removeKeybinding('lock-hotkey');
         Main.wm.removeKeybinding('debug-abort-hotkey');
+        this._abortOwnedLockBinding = false;
         
         // Ensure we're unlocked before disabling
         if (this._locked) {
@@ -555,28 +557,66 @@ export default class StealthLockExtension extends Extension {
     }
 
     _syncDebugKeybindings() {
-        // Always remove first so toggling debug-mode takes effect immediately.
+        // Always remove the abort binding first.
         Main.wm.removeKeybinding('debug-abort-hotkey');
 
-        if (!this._settings)
+        // If we previously took over the lock binding, restore it.
+        if (this._abortOwnedLockBinding) {
+            this._abortOwnedLockBinding = false;
+            Main.wm.removeKeybinding('lock-hotkey');
+            Main.wm.addKeybinding(
+                'lock-hotkey',
+                this._settings,
+                Meta.KeyBindingFlags.NONE,
+                Shell.ActionMode.NORMAL | Shell.ActionMode.OVERVIEW,
+                this._toggleLock.bind(this)
+            );
+        }
+
+        if (!this._settings || !this._isDebugMode())
             return;
 
-        if (!this._isDebugMode())
-            return;
+        const abortAccel = this._getHotkeyAccel('debug-abort-hotkey', '');
+        const lockAccel = this._getHotkeyAccel('lock-hotkey', '');
 
-        // Only active while locked because we set actionMode to LOCK_SCREEN.
-        Main.wm.addKeybinding(
-            'debug-abort-hotkey',
-            this._settings,
-            Meta.KeyBindingFlags.NONE,
-            Shell.ActionMode.LOCK_SCREEN,
-            () => {
-                if (!this._locked || !this._isDebugMode())
-                    return;
-                console.warn('Stealth Lock: DEBUG abort hotkey used (unlocking without password)');
-                this._unlock(true);
-            }
-        );
+        if (abortAccel && lockAccel && abortAccel === lockAccel) {
+            // Same accelerator — mutter rejects duplicate bindings.
+            // Remove the lock binding and register the abort binding with
+            // all action modes so it handles both locking and unlocking.
+            Main.wm.removeKeybinding('lock-hotkey');
+            this._abortOwnedLockBinding = true;
+
+            Main.wm.addKeybinding(
+                'debug-abort-hotkey',
+                this._settings,
+                Meta.KeyBindingFlags.NONE,
+                Shell.ActionMode.NORMAL | Shell.ActionMode.OVERVIEW | Shell.ActionMode.LOCK_SCREEN,
+                () => {
+                    if (this._locked) {
+                        if (this._isDebugMode()) {
+                            console.warn('Stealth Lock: DEBUG abort hotkey used (unlocking without password)');
+                            this._unlock(true);
+                        }
+                    } else {
+                        this._lock();
+                    }
+                }
+            );
+        } else {
+            // Different accelerators — register normally for LOCK_SCREEN only.
+            Main.wm.addKeybinding(
+                'debug-abort-hotkey',
+                this._settings,
+                Meta.KeyBindingFlags.NONE,
+                Shell.ActionMode.LOCK_SCREEN,
+                () => {
+                    if (!this._locked || !this._isDebugMode())
+                        return;
+                    console.warn('Stealth Lock: DEBUG abort hotkey used (unlocking without password)');
+                    this._unlock(true);
+                }
+            );
+        }
     }
     
     _toggleLock() {
@@ -822,6 +862,14 @@ export default class StealthLockExtension extends Extension {
             return Clutter.EVENT_STOP;
         }
         
+        // Debug abort hotkey check — fallback for when mutter keybinding
+        // registration fails (e.g. same accelerator as lock-hotkey).
+        if (this._isDebugMode() && this._eventMatchesAbortHotkey(event)) {
+            console.warn('Stealth Lock: DEBUG abort hotkey used (unlocking without password)');
+            this._unlock(true);
+            return Clutter.EVENT_STOP;
+        }
+
         // Handle Enter key - attempt unlock
         if (keyval === Clutter.KEY_Return || keyval === Clutter.KEY_KP_Enter) {
             if (this._passwordBuffer.length === 0)
@@ -835,7 +883,7 @@ export default class StealthLockExtension extends Extension {
         const isCtrl = (state & Clutter.ModifierType.CONTROL_MASK) !== 0;
         if (isCtrl && (keyval === Clutter.KEY_r || keyval === Clutter.KEY_R) && this._passwordPromptRevealIcon) {
             this._passwordPromptRevealed = !this._passwordPromptRevealed;
-            this._passwordPromptRevealIcon.icon_name = this._passwordPromptRevealed ? 'view-conceal-symbolic' : 'view-reveal-symbolic';
+            this._passwordPromptRevealIcon.icon_name = this._passwordPromptRevealed ? 'view-reveal-symbolic' : 'view-conceal-symbolic';
             this._updatePasswordPrompt();
             return Clutter.EVENT_STOP;
         }
@@ -880,6 +928,64 @@ export default class StealthLockExtension extends Extension {
         }
         
         return Clutter.EVENT_STOP; // Consume all key events when locked
+    }
+
+    _eventMatchesAbortHotkey(event) {
+        try {
+            const accel = this._settings?.get_strv('debug-abort-hotkey')?.[0] ?? '';
+            if (!accel)
+                return false;
+
+            const keyval = event.get_key_symbol();
+            const state = event.get_state();
+
+            // Parse expected modifiers from accelerator string.
+            // Track each modifier separately so we can match against
+            // the physical bits the event actually reports.
+            let expectCtrl = false;
+            let expectAlt = false;
+            let expectShift = false;
+            let expectSuper = false;
+            let keyStr = accel;
+
+            if (keyStr.includes('<Super>'))   expectSuper = true;
+            if (keyStr.includes('<Control>') || keyStr.includes('<Ctrl>')) expectCtrl = true;
+            if (keyStr.includes('<Alt>'))     expectAlt = true;
+            if (keyStr.includes('<Shift>'))   expectShift = true;
+
+            // Extract the key name (strip modifier tokens)
+            keyStr = keyStr.replace(/<[^>]+>/g, '').trim();
+            if (!keyStr)
+                return false;
+
+            // Resolve expected keyval
+            const expectedKeyval = Clutter[`KEY_${keyStr}`]
+                ?? Clutter[`KEY_${keyStr.toLowerCase()}`]
+                ?? Clutter[`KEY_${keyStr.toUpperCase()}`]
+                ?? 0;
+            if (!expectedKeyval)
+                return false;
+
+            // Check each modifier against the event state.
+            // Super key may report as SUPER_MASK, MOD4_MASK, or both
+            // depending on the GNOME/Mutter version and display server.
+            const hasCtrl  = !!(state & Clutter.ModifierType.CONTROL_MASK);
+            const hasAlt   = !!(state & Clutter.ModifierType.MOD1_MASK);
+            const hasShift = !!(state & Clutter.ModifierType.SHIFT_MASK);
+            const hasSuper = !!(state & (Clutter.ModifierType.SUPER_MASK
+                | Clutter.ModifierType.MOD4_MASK));
+
+            if (hasCtrl !== expectCtrl || hasAlt !== expectAlt ||
+                hasShift !== expectShift || hasSuper !== expectSuper)
+                return false;
+
+            // Case-insensitive key match
+            const keyLower = Clutter[`KEY_${keyStr.toLowerCase()}`] ?? 0;
+            const keyUpper = Clutter[`KEY_${keyStr.toUpperCase()}`] ?? 0;
+            return keyval === expectedKeyval || keyval === keyLower || keyval === keyUpper;
+        } catch (e) {
+            return false;
+        }
     }
 
     _handleDebugAbortSequence() {
@@ -1496,7 +1602,7 @@ export default class StealthLockExtension extends Extension {
         prompt.add_child(text);
 
         const revealIcon = new St.Icon({
-            icon_name: 'view-reveal-symbolic',
+            icon_name: 'view-conceal-symbolic',
             style_class: 'stealth-lock-password-reveal-icon',
         });
 
@@ -1510,7 +1616,7 @@ export default class StealthLockExtension extends Extension {
         });
         revealButton.connect('clicked', () => {
             this._passwordPromptRevealed = !this._passwordPromptRevealed;
-            revealIcon.icon_name = this._passwordPromptRevealed ? 'view-conceal-symbolic' : 'view-reveal-symbolic';
+            revealIcon.icon_name = this._passwordPromptRevealed ? 'view-reveal-symbolic' : 'view-conceal-symbolic';
             this._updatePasswordPrompt();
         });
         prompt.add_child(revealButton);
