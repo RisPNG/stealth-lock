@@ -16,7 +16,7 @@ const PROMPT_STYLE_VISIBLE =
   + 'border-radius: 8px; padding: 10px 16px;';
 const PROMPT_STYLE_HIDDEN = 'background-color: transparent; border: 0; padding: 0; spacing: 0;';
 const PROMPT_TEXT_STYLE =
-  'color: rgba(255,255,255,0.9); font-size: 20px; min-width: 220px; min-height: 24px;';
+  'color: rgba(255,255,255,0.9); font-size: 20px; min-width: 220px; min-height: 24px; font-weight: 500; font-family: "Monaspace Krypton NF";';
 const REVEAL_ICON_STYLE = 'color: rgba(255,255,255,0.5); icon-size: 20px;';
 
 // CityGrow-style simulation knobs
@@ -69,8 +69,8 @@ const CLOCK_TOP_RATIO = 0.14;
 const CLOCK_VERTICAL_OFFSET_PX = 0;
 const CLOCK_HORIZONTAL_ALIGN = 'center'; // 'left' | 'center' | 'right'
 const CLOCK_SIDE_MARGIN_PX = 24;
-const CLOCK_TIME_STYLE = 'color: white; font-size: 64px; font-weight: 300;';
-const CLOCK_DATE_STYLE = 'color: rgba(255,255,255,0.70); font-size: 20px; font-weight: 400; margin-top: 6px;';
+const CLOCK_TIME_STYLE = 'color: white; font-size: 64px; font-weight: 700; font-family: "Google Sans";';
+const CLOCK_DATE_STYLE = 'color: rgba(255,255,255,0.70); font-size: 20px; font-weight: 500; margin-top: 6px; font-family: "Google Sans";';
 // CLOCK_MONITOR_MODE:
 // - 'all'      => top-middle across all monitors
 // - 'settings' => use Stealth Lock's "Prompt Monitor" setting (falls back to 'all')

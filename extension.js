@@ -391,6 +391,9 @@ export default class StealthLockExtension extends Extension {
         this._passwordPromptLastStageX = null;
         this._passwordPromptLastStageY = null;
         this._passwordPromptCustomFn = null;
+        this._passwordInputEntry = null;
+        this._passwordInputChangedId = null;
+        this._passwordInputSyncing = false;
     }
     
     enable() {
@@ -686,7 +689,7 @@ export default class StealthLockExtension extends Extension {
         if (this._locked) return;
         
         this._locked = true;
-        this._passwordBuffer = '';
+        this._setPasswordBuffer('');
         this._debugAbortSequenceCount = 0;
         this._debugAbortSequenceLastTime = 0;
         this._lastAuthExitCode = null;
@@ -736,12 +739,16 @@ export default class StealthLockExtension extends Extension {
 
             // Password prompt (optional) - add late so it renders on top
             this._syncPasswordPrompt();
+
+            // Hidden input capture entry for reliable text/IM handling
+            // under Wayland modal grabs.
+            this._ensurePasswordInputCapture();
             
             // 6. Grab keyboard input
             this._grabKeyboard();
             
-            // 7. Focus the overlay
-            this._overlay.grab_key_focus();
+            // 7. Focus the hidden entry when available, otherwise overlay.
+            this._focusPasswordInputCapture();
             
             console.log('Stealth Lock: Locked');
         } catch (e) {
@@ -774,6 +781,7 @@ export default class StealthLockExtension extends Extension {
 
         // 3b. Remove password prompt
         this._destroyPasswordPrompt();
+        this._destroyPasswordInputCapture();
 
         // 4. Remove overlay
         if (this._overlay) {
@@ -793,30 +801,154 @@ export default class StealthLockExtension extends Extension {
             this._resumeAllMedia();
         
         // 6. Clear password buffer and timeout
-        this._passwordBuffer = '';
+        this._setPasswordBuffer('');
         this._clearPasswordResetTimeout();
         
         this._locked = false;
         
         console.log('Stealth Lock: Unlocked');
     }
+
+    _setPasswordBuffer(text) {
+        const next = typeof text === 'string' ? text : '';
+        this._passwordBuffer = next;
+
+        if (!this._passwordInputEntry)
+            return;
+
+        let current = '';
+        try {
+            current = this._passwordInputEntry.get_text?.() ?? '';
+        } catch (e) {
+            current = '';
+        }
+
+        if (current === next)
+            return;
+
+        this._passwordInputSyncing = true;
+        try {
+            this._passwordInputEntry.set_text(next);
+        } catch (e) {
+            // Ignore text sync errors
+        } finally {
+            this._passwordInputSyncing = false;
+        }
+    }
+
+    _syncPasswordBufferFromInputCapture() {
+        if (!this._passwordInputEntry)
+            return;
+
+        try {
+            this._passwordBuffer = this._passwordInputEntry.get_text?.() ?? '';
+        } catch (e) {
+            // Ignore sync errors
+        }
+    }
+
+    _ensurePasswordInputCapture() {
+        if (!this._overlay || this._passwordInputEntry)
+            return;
+
+        const entry = new St.Entry({
+            name: 'stealthLockHiddenInput',
+            text: '',
+            reactive: true,
+            can_focus: true,
+            track_hover: false,
+        });
+
+        entry.set_position(0, 0);
+        entry.set_size(1, 1);
+        entry.opacity = 0;
+        entry.style = 'padding: 0; margin: 0; border: none; background-color: transparent; color: transparent;';
+
+        const clutterText = entry.clutter_text;
+        if (clutterText?.set_single_line_mode)
+            clutterText.set_single_line_mode(true);
+        if (clutterText?.set_editable)
+            clutterText.set_editable(true);
+        if (clutterText?.set_activatable)
+            clutterText.set_activatable(false);
+
+        this._passwordInputChangedId = clutterText?.connect('text-changed', () => {
+            if (this._passwordInputSyncing)
+                return;
+
+            this._syncPasswordBufferFromInputCapture();
+            if (this._locked)
+                this._resetPasswordTimeout();
+            this._updateDebugLabel();
+            this._updatePasswordPrompt();
+        }) ?? null;
+
+        this._passwordInputEntry = entry;
+        this._overlay.add_child(entry);
+    }
+
+    _destroyPasswordInputCapture() {
+        if (this._passwordInputEntry) {
+            if (this._passwordInputChangedId && this._passwordInputEntry.clutter_text) {
+                try {
+                    this._passwordInputEntry.clutter_text.disconnect(this._passwordInputChangedId);
+                } catch (e) {
+                    // Ignore disconnect errors
+                }
+            }
+            this._passwordInputChangedId = null;
+
+            try {
+                this._passwordInputEntry.destroy();
+            } catch (e) {
+                // Ignore destroy errors
+            }
+        }
+
+        this._passwordInputEntry = null;
+        this._passwordInputSyncing = false;
+    }
+
+    _focusPasswordInputCapture() {
+        if (this._passwordInputEntry) {
+            try {
+                this._passwordInputEntry.grab_key_focus();
+                return;
+            } catch (e) {
+                // Fall through to overlay focus
+            }
+        }
+
+        try {
+            this._overlay?.grab_key_focus();
+        } catch (e) {
+            // Ignore focus errors
+        }
+    }
     
     _grabKeyboard() {
         if (this._capturedEventHandlerId)
             return;
 
-        // Stage-level capture for blocking events and handling mouse motion.
-        // Key events are allowed through so the overlay's key-press-event fires
-        // reliably under GNOME 45+ modal grabs.
+        // Stage-level capture for blocking events and handling input.
+        // We process control keys here and selectively propagate printable
+        // keys to the hidden entry so Mutter/Clutter can apply layout/IM
+        // translation under Wayland modal grabs.
         this._capturedEventHandlerId = global.stage.connect('captured-event', (stage, event) => {
             if (!this._locked)
                 return Clutter.EVENT_PROPAGATE;
 
             const type = event.type();
 
-            // Let key events propagate to the overlay's key-press-event handler
-            if (type === Clutter.EventType.KEY_PRESS || type === Clutter.EventType.KEY_RELEASE)
-                return Clutter.EVENT_PROPAGATE;
+            // Handle key events directly at the capture phase
+            if (type === Clutter.EventType.KEY_PRESS)
+                return this._onKeyPress(this._overlay, event);
+            if (type === Clutter.EventType.KEY_RELEASE)
+                return this._passwordInputEntry ? Clutter.EVENT_PROPAGATE : Clutter.EVENT_STOP;
+            if (Clutter.EventType.IM_COMMIT !== undefined && type === Clutter.EventType.IM_COMMIT)
+                return this._onImCommit(event);
+            if (Clutter.EventType.IM_DELETE !== undefined && type === Clutter.EventType.IM_DELETE)
+                return this._onImDelete(event);
 
             const coords = event.get_coords?.();
             const ex = coords?.x ?? coords?.[0] ?? 0;
@@ -849,8 +981,9 @@ export default class StealthLockExtension extends Extension {
             return Clutter.EVENT_STOP;
         });
 
-        // Key events on the overlay (the modal grab target) — this is the
-        // reliable path for keyboard input during pushModal.
+        // Secondary key-press handler on the overlay — kept as a fallback
+        // in case some GNOME/Mutter version delivers events directly to the
+        // modal target without going through the stage capture phase.
         if (this._overlay) {
             this._overlayKeyPressId = this._overlay.connect('key-press-event', (actor, event) => {
                 return this._onKeyPress(actor, event);
@@ -872,11 +1005,97 @@ export default class StealthLockExtension extends Extension {
     _onKeyPress(actor, event) {
         if (!this._locked) return Clutter.EVENT_PROPAGATE;
         
-        const keyval = event.get_key_symbol();
-        const state = event.get_state();
+        let keyval = 0;
+        let keycode = 0;
+        let state = 0;
+        let flags = 0;
+        try { keyval = event.get_key_symbol?.() ?? 0; } catch (e) { keyval = 0; }
+        try { keycode = event.get_key_code?.() ?? 0; } catch (e) { keycode = 0; }
+        try { state = event.get_state?.() ?? 0; } catch (e) { state = 0; }
+        try { flags = event.get_flags?.() ?? 0; } catch (e) { flags = 0; }
+        
+        // Reset the password timeout on any key press
+        this._resetPasswordTimeout();
+
+        // Emergency fallback: switch to GNOME's real lock screen
+        // (prevents getting stuck behind the stealth overlay)
+        const emergencyModifiers =
+            (state & Clutter.ModifierType.CONTROL_MASK) &&
+            (state & Clutter.ModifierType.MOD1_MASK) &&
+            (state & Clutter.ModifierType.SHIFT_MASK);
+        if (emergencyModifiers && (keyval === Clutter.KEY_l || keyval === Clutter.KEY_L)) {
+            this._fallbackToSystemLock();
+            return Clutter.EVENT_STOP;
+        }
+        
+        // Debug abort hotkey check — fallback for when mutter keybinding
+        // registration fails (e.g. same accelerator as lock-hotkey).
+        if (this._isDebugMode() && this._eventMatchesAbortHotkey(event)) {
+            console.warn('Stealth Lock: DEBUG abort hotkey used (unlocking without password)');
+            this._unlock(true);
+            return Clutter.EVENT_STOP;
+        }
+
+        // Handle Enter key - attempt unlock
+        if (keyval === Clutter.KEY_Return || keyval === Clutter.KEY_KP_Enter) {
+            this._syncPasswordBufferFromInputCapture();
+            if (this._passwordBuffer.length === 0)
+                console.log('Stealth Lock: Unlock attempt (empty buffer)');
+            this._attemptUnlock();
+            this._updatePasswordPrompt();
+            return Clutter.EVENT_STOP;
+        }
+
+        // Normal prompt: toggle reveal (Ctrl+R)
+        const isCtrl = (state & Clutter.ModifierType.CONTROL_MASK) !== 0;
+        if (isCtrl && (keyval === Clutter.KEY_r || keyval === Clutter.KEY_R) && this._passwordPromptRevealIcon) {
+            this._passwordPromptRevealed = !this._passwordPromptRevealed;
+            this._passwordPromptRevealIcon.icon_name = this._passwordPromptRevealed ? 'view-reveal-symbolic' : 'view-conceal-symbolic';
+            this._updatePasswordPrompt();
+            return Clutter.EVENT_STOP;
+        }
+        
+        // Handle Backspace
+        if (keyval === Clutter.KEY_BackSpace) {
+            if (this._passwordInputEntry) {
+                this._focusPasswordInputCapture();
+                return Clutter.EVENT_PROPAGATE;
+            }
+
+            this._removeTrailingCodePoints(1);
+            this._updateDebugLabel();
+            this._updatePasswordPrompt();
+            return Clutter.EVENT_STOP;
+        }
+        
+        // Handle Escape - clear password buffer
+        if (keyval === Clutter.KEY_Escape) {
+            this._setPasswordBuffer('');
+            this._handleDebugAbortSequence();
+            this._updateDebugLabel();
+            this._updatePasswordPrompt();
+            return Clutter.EVENT_STOP;
+        }
+        
+        // Ignore modifier keys
+        if (keyval === Clutter.KEY_Shift_L || keyval === Clutter.KEY_Shift_R ||
+            keyval === Clutter.KEY_Control_L || keyval === Clutter.KEY_Control_R ||
+            keyval === Clutter.KEY_Alt_L || keyval === Clutter.KEY_Alt_R ||
+            keyval === Clutter.KEY_Super_L || keyval === Clutter.KEY_Super_R ||
+            keyval === Clutter.KEY_Caps_Lock || keyval === Clutter.KEY_Num_Lock) {
+            return Clutter.EVENT_STOP;
+        }
+
+        // With hidden input capture active, let GNOME/Clutter handle
+        // printable input and IM composition, then mirror entry text.
+        if (this._passwordInputEntry) {
+            this._focusPasswordInputCapture();
+            return Clutter.EVENT_PROPAGATE;
+        }
+
         // Resolve Unicode character from the key event.
         // event.get_key_unicode() and Clutter.keysym_to_unicode() are
-        // unavailable or broken under modal grabs in GNOME 46+, so we
+        // unavailable or broken under some modal grabs in GNOME 46+, so we
         // fall back to direct keysym mapping.
         let keychar = 0;
         try { keychar = event.get_key_unicode?.() ?? 0; } catch (_) { /* */ }
@@ -903,86 +1122,129 @@ export default class StealthLockExtension extends Extension {
                 keychar = 0;                              // Discard control chars
         }
         
-        // Reset the password timeout on any key press
-        this._resetPasswordTimeout();
-
-        // Emergency fallback: switch to GNOME's real lock screen
-        // (prevents getting stuck behind the stealth overlay)
-        const emergencyModifiers =
-            (state & Clutter.ModifierType.CONTROL_MASK) &&
-            (state & Clutter.ModifierType.MOD1_MASK) &&
-            (state & Clutter.ModifierType.SHIFT_MASK);
-        if (emergencyModifiers && (keyval === Clutter.KEY_l || keyval === Clutter.KEY_L)) {
-            this._fallbackToSystemLock();
-            return Clutter.EVENT_STOP;
-        }
-        
-        // Debug abort hotkey check — fallback for when mutter keybinding
-        // registration fails (e.g. same accelerator as lock-hotkey).
-        if (this._isDebugMode() && this._eventMatchesAbortHotkey(event)) {
-            console.warn('Stealth Lock: DEBUG abort hotkey used (unlocking without password)');
-            this._unlock(true);
-            return Clutter.EVENT_STOP;
-        }
-
-        // Handle Enter key - attempt unlock
-        if (keyval === Clutter.KEY_Return || keyval === Clutter.KEY_KP_Enter) {
-            if (this._passwordBuffer.length === 0)
-                console.log('Stealth Lock: Unlock attempt (empty buffer)');
-            this._attemptUnlock();
-            this._updatePasswordPrompt();
-            return Clutter.EVENT_STOP;
-        }
-
-        // Normal prompt: toggle reveal (Ctrl+R)
-        const isCtrl = (state & Clutter.ModifierType.CONTROL_MASK) !== 0;
-        if (isCtrl && (keyval === Clutter.KEY_r || keyval === Clutter.KEY_R) && this._passwordPromptRevealIcon) {
-            this._passwordPromptRevealed = !this._passwordPromptRevealed;
-            this._passwordPromptRevealIcon.icon_name = this._passwordPromptRevealed ? 'view-reveal-symbolic' : 'view-conceal-symbolic';
-            this._updatePasswordPrompt();
-            return Clutter.EVENT_STOP;
-        }
-        
-        // Handle Backspace
-        if (keyval === Clutter.KEY_BackSpace) {
-            if (this._passwordBuffer.length > 0) {
-                this._passwordBuffer = this._passwordBuffer.slice(0, -1);
-            }
-            this._updateDebugLabel();
-            this._updatePasswordPrompt();
-            return Clutter.EVENT_STOP;
-        }
-        
-        // Handle Escape - clear password buffer
-        if (keyval === Clutter.KEY_Escape) {
-            this._passwordBuffer = '';
-            this._handleDebugAbortSequence();
-            this._updateDebugLabel();
-            this._updatePasswordPrompt();
-            return Clutter.EVENT_STOP;
-        }
-        
-        // Ignore modifier keys
-        if (keyval === Clutter.KEY_Shift_L || keyval === Clutter.KEY_Shift_R ||
-            keyval === Clutter.KEY_Control_L || keyval === Clutter.KEY_Control_R ||
-            keyval === Clutter.KEY_Alt_L || keyval === Clutter.KEY_Alt_R ||
-            keyval === Clutter.KEY_Super_L || keyval === Clutter.KEY_Super_R ||
-            keyval === Clutter.KEY_Caps_Lock || keyval === Clutter.KEY_Num_Lock) {
-            return Clutter.EVENT_STOP;
-        }
-        
         // Add printable characters to password buffer
         if (keychar && keychar !== 0) {
-            this._passwordBuffer += String.fromCodePoint(keychar);
+            try {
+                this._setPasswordBuffer(this._passwordBuffer + String.fromCodePoint(keychar));
+            } catch (e) {
+                keychar = 0;
+            }
+
+            if (!keychar)
+                return Clutter.EVENT_STOP;
+
             if (this._isDebugMode())
-                console.log(`Stealth Lock: KEY sym=0x${keyval.toString(16)} uni=U+${keychar.toString(16).padStart(4, '0')} bufLen=${this._passwordBuffer.length}`);
+                console.log(`Stealth Lock: KEY sym=0x${keyval.toString(16)} code=${keycode} flags=0x${flags.toString(16)} uni=U+${keychar.toString(16).padStart(4, '0')} bufLen=${this._passwordBuffer.length}`);
             this._updateDebugLabel();
             this._updatePasswordPrompt();
         } else if (this._isDebugMode()) {
-            console.log(`Stealth Lock: KEY sym=0x${keyval.toString(16)} uni=NONE (not added)`);
+            console.log(`Stealth Lock: KEY sym=0x${keyval.toString(16)} code=${keycode} flags=0x${flags.toString(16)} uni=NONE (not added)`);
         }
         
         return Clutter.EVENT_STOP; // Consume all key events when locked
+    }
+
+    _onImCommit(event) {
+        if (!this._locked)
+            return Clutter.EVENT_PROPAGATE;
+
+        if (this._passwordInputEntry)
+            return Clutter.EVENT_PROPAGATE;
+
+        this._resetPasswordTimeout();
+
+        let text = '';
+        try {
+            text = event.get_im_text?.() ?? '';
+        } catch (e) {
+            text = '';
+        }
+
+        if (this._appendCommittedText(text, 'IM_COMMIT'))
+            return Clutter.EVENT_STOP;
+
+        if (this._isDebugMode())
+            console.log('Stealth Lock: IM_COMMIT empty (not added)');
+
+        return Clutter.EVENT_STOP;
+    }
+
+    _onImDelete(event) {
+        if (!this._locked)
+            return Clutter.EVENT_PROPAGATE;
+
+        if (this._passwordInputEntry)
+            return Clutter.EVENT_PROPAGATE;
+
+        this._resetPasswordTimeout();
+
+        let deleteLength = 0;
+        let gotDeleteLength = false;
+        try {
+            const n = event.get_im_delete_length?.() ?? 0;
+            if (Number.isFinite(n)) {
+                gotDeleteLength = true;
+                deleteLength = Math.abs(Math.trunc(n));
+            }
+        } catch (e) {
+            deleteLength = 0;
+        }
+
+        if (!gotDeleteLength)
+            deleteLength = 1;
+
+        if (deleteLength > 0)
+            this._removeTrailingCodePoints(deleteLength);
+
+        this._updateDebugLabel();
+        this._updatePasswordPrompt();
+
+        if (this._isDebugMode())
+            console.log(`Stealth Lock: IM_DELETE len=${deleteLength} bufLen=${this._passwordBuffer.length}`);
+
+        return Clutter.EVENT_STOP;
+    }
+
+    _appendCommittedText(text, source = 'IM') {
+        if (typeof text !== 'string' || !text.length)
+            return false;
+
+        let appended = '';
+        for (const ch of text) {
+            const codePoint = ch.codePointAt(0) ?? 0;
+            // Filter out ASCII control characters; keep everything else.
+            if (codePoint >= 0x20 && codePoint !== 0x7f)
+                appended += ch;
+        }
+
+        if (!appended)
+            return false;
+
+        this._setPasswordBuffer(this._passwordBuffer + appended);
+
+        if (this._isDebugMode()) {
+            const cps = Array.from(appended, ch => `U+${(ch.codePointAt(0) ?? 0).toString(16).padStart(4, '0')}`);
+            const preview = cps.slice(0, 8).join(',');
+            const suffix = cps.length > 8 ? ',...' : '';
+            console.log(`Stealth Lock: ${source} cps=${preview}${suffix} bufLen=${this._passwordBuffer.length}`);
+        }
+
+        this._updateDebugLabel();
+        this._updatePasswordPrompt();
+        return true;
+    }
+
+    _removeTrailingCodePoints(count = 1) {
+        const n = Math.max(0, Math.trunc(count));
+        if (!n || !this._passwordBuffer.length)
+            return;
+
+        const chars = Array.from(this._passwordBuffer);
+        if (!chars.length)
+            return;
+
+        chars.splice(Math.max(0, chars.length - n), n);
+        this._setPasswordBuffer(chars.join(''));
     }
 
     _eventMatchesAbortHotkey(event) {
@@ -1123,7 +1385,7 @@ export default class StealthLockExtension extends Extension {
             seconds * 1000,
             () => {
                 console.log('Stealth Lock: Password reset due to inactivity');
-                this._passwordBuffer = '';
+                this._setPasswordBuffer('');
                 this._updatePasswordPrompt();
                 this._passwordResetTimeoutId = null;
                 return GLib.SOURCE_REMOVE;
@@ -1139,10 +1401,12 @@ export default class StealthLockExtension extends Extension {
     }
     
     async _attemptUnlock() {
+        this._syncPasswordBufferFromInputCapture();
+
         if (this._passwordBuffer.length === 0) return;
         
         const password = this._passwordBuffer;
-        this._passwordBuffer = ''; // Clear immediately for security
+        this._setPasswordBuffer(''); // Clear immediately for security
         this._updatePasswordPrompt();
 
         console.log(`Stealth Lock: Unlock attempt (len=${password.length})`);
@@ -1726,6 +1990,7 @@ export default class StealthLockExtension extends Extension {
             this._passwordPromptRevealed = !this._passwordPromptRevealed;
             revealIcon.icon_name = this._passwordPromptRevealed ? 'view-reveal-symbolic' : 'view-conceal-symbolic';
             this._updatePasswordPrompt();
+            this._focusPasswordInputCapture();
         });
         prompt.add_child(revealButton);
 
