@@ -382,6 +382,9 @@ export default class StealthLockExtension extends Extension {
         this._activeCursorMode = CURSOR_MODE_LOCK_ICON;
         this._abortHotkeySyncing = false;
         this._abortOwnedLockBinding = false;
+        this._overlayKeybindingSuppressed = false;
+        this._overlayKeybindingPreviousModes = null;
+        this._suppressedKeybindingModes = null;
 
         this._passwordPrompt = null;
         this._passwordPromptText = null;
@@ -676,6 +679,164 @@ export default class StealthLockExtension extends Extension {
             );
         }
     }
+
+    _getAllowedKeybindingModes(name) {
+        const candidates = [
+            Main.wm?._allowedKeybindings,
+            Main.wm?._allowedKeybindingModes,
+        ];
+
+        for (const store of candidates) {
+            if (!store)
+                continue;
+
+            try {
+                if (store instanceof Map) {
+                    if (store.has(name))
+                        return store.get(name);
+                    continue;
+                }
+
+                if (typeof store.get === 'function') {
+                    const value = store.get(name);
+                    if (value !== undefined)
+                        return value;
+                }
+
+                if (Object.prototype.hasOwnProperty.call(store, name))
+                    return store[name];
+            } catch (e) {
+                // Ignore private API lookup failures
+            }
+        }
+
+        return null;
+    }
+
+    _getAllowedKeybindingSnapshot() {
+        const snapshot = new Map();
+        const candidates = [
+            Main.wm?._allowedKeybindings,
+            Main.wm?._allowedKeybindingModes,
+        ];
+
+        for (const store of candidates) {
+            if (!store)
+                continue;
+
+            try {
+                if (store instanceof Map) {
+                    for (const [name, modes] of store.entries()) {
+                        if (typeof name === 'string')
+                            snapshot.set(name, modes);
+                    }
+                    continue;
+                }
+
+                if (typeof store.entries === 'function') {
+                    for (const [name, modes] of store.entries()) {
+                        if (typeof name === 'string')
+                            snapshot.set(name, modes);
+                    }
+                    continue;
+                }
+
+                for (const name of Object.keys(store)) {
+                    if (typeof name === 'string')
+                        snapshot.set(name, store[name]);
+                }
+            } catch (e) {
+                // Ignore private API snapshot failures
+            }
+        }
+
+        return snapshot;
+    }
+
+    _isArcMenuActive() {
+        try {
+            if (typeof global.toggleArcMenu === 'function')
+                return true;
+
+            const extension = Main.extensionManager?.lookup?.('arcmenu@arcmenu.com');
+            return extension?.state === 1;
+        } catch (e) {
+            return false;
+        }
+    }
+
+    _getOverlayKeybindingRestoreModes() {
+        if (this._overlayKeybindingPreviousModes !== null)
+            return this._overlayKeybindingPreviousModes;
+
+        return this._isArcMenuActive()
+            ? Shell.ActionMode.ALL
+            : Shell.ActionMode.NORMAL | Shell.ActionMode.OVERVIEW;
+    }
+
+    _suppressOverlayKeybinding() {
+        if (this._overlayKeybindingSuppressed)
+            return;
+
+        this._overlayKeybindingPreviousModes = this._getAllowedKeybindingModes('overlay-key');
+
+        try {
+            Main.wm.allowKeybinding('overlay-key', Shell.ActionMode.NONE);
+            this._overlayKeybindingSuppressed = true;
+        } catch (e) {
+            this._overlayKeybindingPreviousModes = null;
+        }
+    }
+
+    _restoreOverlayKeybinding() {
+        if (!this._overlayKeybindingSuppressed)
+            return;
+
+        const modes = this._getOverlayKeybindingRestoreModes();
+
+        try {
+            Main.wm.allowKeybinding('overlay-key', modes);
+        } catch (e) {
+            // Ignore restore failures
+        }
+
+        this._overlayKeybindingSuppressed = false;
+        this._overlayKeybindingPreviousModes = null;
+    }
+
+    _suppressShellKeybindings() {
+        if (this._suppressedKeybindingModes)
+            return;
+
+        this._suppressedKeybindingModes = this._getAllowedKeybindingSnapshot();
+
+        for (const name of this._suppressedKeybindingModes.keys()) {
+            try {
+                Main.wm.allowKeybinding(name, Shell.ActionMode.NONE);
+            } catch (e) {
+                // Ignore individual keybinding suppression failures
+            }
+        }
+
+        // Overlay-key can be managed outside the normal keybinding map by
+        // extensions like ArcMenu, so suppress it explicitly as well.
+        this._suppressOverlayKeybinding();
+    }
+
+    _restoreShellKeybindings() {
+        if (this._suppressedKeybindingModes) {
+            for (const [name, modes] of this._suppressedKeybindingModes.entries()) {
+                try {
+                    Main.wm.allowKeybinding(name, modes);
+                } catch (e) {
+                    // Ignore individual keybinding restore failures
+                }
+            }
+            this._suppressedKeybindingModes = null;
+        }
+
+        this._restoreOverlayKeybinding();
+    }
     
     _toggleLock() {
         if (this._locked) {
@@ -722,6 +883,9 @@ export default class StealthLockExtension extends Extension {
             this._modalGrab = Main.pushModal(this._overlay, {
                 actionMode: Shell.ActionMode.LOCK_SCREEN,
             });
+
+            // Disable shell keybindings and extension hotkeys while locked.
+            this._suppressShellKeybindings();
 
             // Debug overlay (optional)
             if (this._shouldShowDebugInfo()) {
@@ -774,6 +938,9 @@ export default class StealthLockExtension extends Extension {
             }
             this._modalGrab = null;
         }
+
+        // Restore shell keybindings after leaving the locked mode.
+        this._restoreShellKeybindings();
 
         // 3. Restore cursor
         this._restoreCursor();
@@ -944,7 +1111,7 @@ export default class StealthLockExtension extends Extension {
             if (type === Clutter.EventType.KEY_PRESS)
                 return this._onKeyPress(this._overlay, event);
             if (type === Clutter.EventType.KEY_RELEASE)
-                return this._passwordInputEntry ? Clutter.EVENT_PROPAGATE : Clutter.EVENT_STOP;
+                return this._onKeyRelease(this._overlay, event);
             if (Clutter.EventType.IM_COMMIT !== undefined && type === Clutter.EventType.IM_COMMIT)
                 return this._onImCommit(event);
             if (Clutter.EventType.IM_DELETE !== undefined && type === Clutter.EventType.IM_DELETE)
@@ -1000,6 +1167,36 @@ export default class StealthLockExtension extends Extension {
             this._overlay.disconnect(this._overlayKeyPressId);
             this._overlayKeyPressId = null;
         }
+    }
+
+    _isIgnoredModifierKey(keyval) {
+        return keyval === Clutter.KEY_Shift_L || keyval === Clutter.KEY_Shift_R ||
+            keyval === Clutter.KEY_Control_L || keyval === Clutter.KEY_Control_R ||
+            keyval === Clutter.KEY_Alt_L || keyval === Clutter.KEY_Alt_R ||
+            keyval === Clutter.KEY_Super_L || keyval === Clutter.KEY_Super_R ||
+            keyval === Clutter.KEY_Meta_L || keyval === Clutter.KEY_Meta_R ||
+            keyval === Clutter.KEY_Caps_Lock || keyval === Clutter.KEY_Num_Lock;
+    }
+
+    _isShellModifierKey(keyval) {
+        return keyval === Clutter.KEY_Super_L || keyval === Clutter.KEY_Super_R ||
+            keyval === Clutter.KEY_Meta_L || keyval === Clutter.KEY_Meta_R;
+    }
+
+    _onKeyRelease(actor, event) {
+        if (!this._locked)
+            return Clutter.EVENT_PROPAGATE;
+
+        let keyval = 0;
+        try { keyval = event.get_key_symbol?.() ?? 0; } catch (e) { keyval = 0; }
+
+        // GNOME can toggle overview on a bare Super key release, so keep
+        // those events inside the lock even when printable input is handled
+        // by the hidden capture entry.
+        if (this._isShellModifierKey(keyval))
+            return Clutter.EVENT_STOP;
+
+        return this._passwordInputEntry ? Clutter.EVENT_PROPAGATE : Clutter.EVENT_STOP;
     }
     
     _onKeyPress(actor, event) {
@@ -1078,11 +1275,7 @@ export default class StealthLockExtension extends Extension {
         }
         
         // Ignore modifier keys
-        if (keyval === Clutter.KEY_Shift_L || keyval === Clutter.KEY_Shift_R ||
-            keyval === Clutter.KEY_Control_L || keyval === Clutter.KEY_Control_R ||
-            keyval === Clutter.KEY_Alt_L || keyval === Clutter.KEY_Alt_R ||
-            keyval === Clutter.KEY_Super_L || keyval === Clutter.KEY_Super_R ||
-            keyval === Clutter.KEY_Caps_Lock || keyval === Clutter.KEY_Num_Lock) {
+        if (this._isIgnoredModifierKey(keyval)) {
             return Clutter.EVENT_STOP;
         }
 
