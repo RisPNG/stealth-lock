@@ -176,12 +176,30 @@
       </description>
     </key>
 
+    <key name="normal-prompt-css-saved-entries" type="s">
+      <default>'[]'</default>
+      <summary>Normal Prompt CSS Saved Entries</summary>
+      <description>
+        JSON array of saved Custom CSS entries for the Normal password prompt editor.
+        Each entry stores a name and code snippet.
+      </description>
+    </key>
+
     <key name="normal-prompt-custom-js" type="s">
       <default>''</default>
       <summary>Normal Prompt Custom JS</summary>
       <description>
         Optional JavaScript snippet executed for the password prompt (Normal lock type).
         Receives a context object; use with care.
+      </description>
+    </key>
+
+    <key name="normal-prompt-custom-js-saved-entries" type="s">
+      <default>'[]'</default>
+      <summary>Normal Prompt Custom JS Saved Entries</summary>
+      <description>
+        JSON array of saved Custom JS entries for the Normal password prompt editor.
+        Each entry stores a name and code snippet.
       </description>
     </key>
 

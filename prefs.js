@@ -424,6 +424,13 @@ export default class StealthLockPreferences extends ExtensionPreferences {
             css_classes: ['flat'],
         });
         customCssRow.add_suffix(editCssButton);
+        const savedCssButton = new Gtk.Button({
+            icon_name: 'view-list-symbolic',
+            valign: Gtk.Align.CENTER,
+            css_classes: ['flat'],
+            tooltip_text: _('Saved entries'),
+        });
+        customCssRow.add_suffix(savedCssButton);
         customCssRow.activatable_widget = editCssButton;
         passwordGroup.add(customCssRow);
 
@@ -437,6 +444,13 @@ export default class StealthLockPreferences extends ExtensionPreferences {
             css_classes: ['flat'],
         });
         customJsRow.add_suffix(editJsButton);
+        const savedJsButton = new Gtk.Button({
+            icon_name: 'view-list-symbolic',
+            valign: Gtk.Align.CENTER,
+            css_classes: ['flat'],
+            tooltip_text: _('Saved entries'),
+        });
+        customJsRow.add_suffix(savedJsButton);
         customJsRow.activatable_widget = editJsButton;
         passwordGroup.add(customJsRow);
 
@@ -456,8 +470,10 @@ export default class StealthLockPreferences extends ExtensionPreferences {
 
             customCssRow.sensitive = isNormal;
             editCssButton.sensitive = isNormal;
+            savedCssButton.sensitive = isNormal;
             customJsRow.sensitive = isNormal;
             editJsButton.sensitive = isNormal;
+            savedJsButton.sensitive = isNormal;
         };
 
         const syncAnchorSelected = () => {
@@ -527,7 +543,10 @@ export default class StealthLockPreferences extends ExtensionPreferences {
                 settings,
                 'normal-prompt-css',
                 _('Custom CSS'),
-                _('Inline CSS applied to the Normal password prompt container.')
+                _('Inline CSS applied to the Normal password prompt container.'),
+                {
+                    entriesKey: 'normal-prompt-css-saved-entries',
+                }
             );
         });
 
@@ -537,7 +556,32 @@ export default class StealthLockPreferences extends ExtensionPreferences {
                 settings,
                 'normal-prompt-custom-js',
                 _('Custom JS'),
-                _('Advanced: runs inside GNOME Shell. The code receives a single object `ctx` with fields like `ctx.event`, `ctx.prompt`, `ctx.text`, `ctx.revealButton`, `ctx.buffer`, `ctx.masked`, `ctx.revealed`.')
+                _('Advanced: runs inside GNOME Shell. The code receives a single object `ctx` with fields like `ctx.event`, `ctx.prompt`, `ctx.text`, `ctx.revealButton`, `ctx.buffer`, `ctx.masked`, `ctx.revealed`.'),
+                {
+                    entriesKey: 'normal-prompt-custom-js-saved-entries',
+                }
+            );
+        });
+
+        savedCssButton.connect('clicked', () => {
+            this._showSavedTextEntriesDialog(
+                window,
+                settings,
+                'normal-prompt-css',
+                'normal-prompt-css-saved-entries',
+                _('Custom CSS'),
+                _('Click an entry to load it into the current Custom CSS value.')
+            );
+        });
+
+        savedJsButton.connect('clicked', () => {
+            this._showSavedTextEntriesDialog(
+                window,
+                settings,
+                'normal-prompt-custom-js',
+                'normal-prompt-custom-js-saved-entries',
+                _('Custom JS'),
+                _('Click an entry to load it into the current Custom JS value.')
             );
         });
 
@@ -1005,7 +1049,454 @@ export default class StealthLockPreferences extends ExtensionPreferences {
         dialog.present();
     }
 
-    _showTextEditDialog(window, settings, settingsKey, title, description) {
+    _getSavedTextEntries(settings, entriesKey) {
+        let raw = '[]';
+        try {
+            raw = settings.get_string(entriesKey) ?? '[]';
+        } catch (e) {
+            raw = '[]';
+        }
+
+        if (!raw)
+            raw = '[]';
+
+        let parsed = [];
+        try {
+            parsed = JSON.parse(raw);
+        } catch (e) {
+            parsed = [];
+        }
+
+        if (!Array.isArray(parsed))
+            return [];
+
+        return parsed
+            .map(entry => {
+                const name = typeof entry?.name === 'string' ? entry.name.trim() : '';
+                const code = typeof entry?.code === 'string' ? entry.code : '';
+                if (!name)
+                    return null;
+                return { name, code };
+            })
+            .filter(entry => entry !== null);
+    }
+
+    _setSavedTextEntries(settings, entriesKey, entries) {
+        const normalized = [];
+        for (const entry of Array.isArray(entries) ? entries : []) {
+            const name = typeof entry?.name === 'string' ? entry.name.trim() : '';
+            if (!name)
+                continue;
+
+            normalized.push({
+                name,
+                code: typeof entry?.code === 'string' ? entry.code : '',
+            });
+        }
+
+        settings.set_string(entriesKey, JSON.stringify(normalized));
+    }
+
+    _makeUniqueSavedEntryName(entries, baseName, excludeIndex = -1) {
+        const trimmed = (baseName ?? '').trim() || _('Untitled');
+        const taken = new Set(
+            entries
+                .map((entry, index) => index === excludeIndex ? '' : (entry?.name ?? '').trim().toLowerCase())
+                .filter(Boolean)
+        );
+
+        if (!taken.has(trimmed.toLowerCase()))
+            return trimmed;
+
+        let suffix = 2;
+        let candidate = `${trimmed} (${suffix})`;
+        while (taken.has(candidate.toLowerCase())) {
+            suffix += 1;
+            candidate = `${trimmed} (${suffix})`;
+        }
+
+        return candidate;
+    }
+
+    _getSavedEntryPreview(code) {
+        const lines = String(code ?? '')
+            .split(/\r?\n/)
+            .map(line => line.trim())
+            .filter(Boolean);
+        const preview = lines[0] || _('Empty snippet');
+        if (preview.length <= 72)
+            return preview;
+        return `${preview.slice(0, 69)}...`;
+    }
+
+    _promptForSavedEntryName(window, options) {
+        const dialog = new Gtk.Dialog({
+            title: options?.title ?? _('Entry Name'),
+            modal: true,
+            transient_for: window,
+            default_width: 420,
+        });
+
+        dialog.add_button(_('Cancel'), Gtk.ResponseType.CANCEL);
+        const saveButton = dialog.add_button(options?.acceptLabel ?? _('Save'), Gtk.ResponseType.OK);
+
+        const contentArea = dialog.get_content_area();
+        contentArea.set_margin_top(12);
+        contentArea.set_margin_bottom(12);
+        contentArea.set_margin_start(12);
+        contentArea.set_margin_end(12);
+        contentArea.set_spacing(12);
+
+        if (options?.description) {
+            const label = new Gtk.Label({
+                label: options.description,
+                wrap: true,
+                xalign: 0,
+            });
+            contentArea.append(label);
+        }
+
+        const entry = new Gtk.Entry({
+            text: options?.initialName ?? '',
+            activates_default: true,
+            hexpand: true,
+        });
+        contentArea.append(entry);
+
+        dialog.set_default_response(Gtk.ResponseType.OK);
+        saveButton.sensitive = entry.get_text().trim().length > 0;
+
+        entry.connect('changed', () => {
+            saveButton.sensitive = entry.get_text().trim().length > 0;
+        });
+
+        dialog.connect('response', (d, response) => {
+            try {
+                if (response === Gtk.ResponseType.OK) {
+                    const entries = Array.isArray(options?.entries) ? options.entries : [];
+                    const excludeIndex = Number.isInteger(options?.excludeIndex) ? options.excludeIndex : -1;
+                    const name = this._makeUniqueSavedEntryName(entries, entry.get_text(), excludeIndex);
+                    options?.onConfirm?.(name);
+                }
+            } finally {
+                d.destroy();
+            }
+        });
+
+        dialog.present();
+    }
+
+    _promptForSavedEntrySelection(window, title, description, entries, onConfirm) {
+        if (!Array.isArray(entries) || entries.length === 0)
+            return;
+
+        const dialog = new Gtk.Dialog({
+            title,
+            modal: true,
+            transient_for: window,
+            default_width: 480,
+        });
+
+        dialog.add_button(_('Cancel'), Gtk.ResponseType.CANCEL);
+        dialog.add_button(_('Replace'), Gtk.ResponseType.OK);
+
+        const contentArea = dialog.get_content_area();
+        contentArea.set_margin_top(12);
+        contentArea.set_margin_bottom(12);
+        contentArea.set_margin_start(12);
+        contentArea.set_margin_end(12);
+        contentArea.set_spacing(12);
+
+        if (description) {
+            const label = new Gtk.Label({
+                label: description,
+                wrap: true,
+                xalign: 0,
+            });
+            contentArea.append(label);
+        }
+
+        const names = Gtk.StringList.new(entries.map(entry => entry.name));
+        const dropdown = new Gtk.DropDown({
+            model: names,
+            selected: 0,
+            hexpand: true,
+        });
+        contentArea.append(dropdown);
+
+        const previewLabel = new Gtk.Label({
+            label: this._getSavedEntryPreview(entries[0]?.code ?? ''),
+            wrap: true,
+            xalign: 0,
+        });
+        previewLabel.add_css_class('dim-label');
+        contentArea.append(previewLabel);
+
+        dropdown.connect('notify::selected', () => {
+            previewLabel.label = this._getSavedEntryPreview(entries[dropdown.selected]?.code ?? '');
+        });
+
+        dialog.connect('response', (d, response) => {
+            try {
+                if (response === Gtk.ResponseType.OK) {
+                    const index = Math.max(0, Math.min(entries.length - 1, dropdown.selected));
+                    onConfirm?.(index);
+                }
+            } finally {
+                d.destroy();
+            }
+        });
+
+        dialog.present();
+    }
+
+    _showSavedTextEntriesDialog(window, settings, settingsKey, entriesKey, title, description) {
+        const dialog = new Gtk.Dialog({
+            title: _('%s Saved Entries').format(title),
+            modal: true,
+            transient_for: window,
+            default_width: 760,
+            default_height: 520,
+        });
+
+        dialog.add_button(_('Close'), Gtk.ResponseType.CLOSE);
+
+        const contentArea = dialog.get_content_area();
+        contentArea.set_margin_top(12);
+        contentArea.set_margin_bottom(12);
+        contentArea.set_margin_start(12);
+        contentArea.set_margin_end(12);
+        contentArea.set_spacing(12);
+
+        const headerBox = new Gtk.Box({
+            orientation: Gtk.Orientation.HORIZONTAL,
+            spacing: 12,
+        });
+        contentArea.append(headerBox);
+
+        const headerLabel = new Gtk.Label({
+            label: description,
+            wrap: true,
+            xalign: 0,
+            hexpand: true,
+        });
+        headerBox.append(headerLabel);
+
+        const addButton = new Gtk.Button({
+            label: _('Add Entry'),
+            valign: Gtk.Align.CENTER,
+        });
+        headerBox.append(addButton);
+
+        const scrolled = new Gtk.ScrolledWindow({
+            hexpand: true,
+            vexpand: true,
+        });
+        scrolled.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC);
+        contentArea.append(scrolled);
+
+        const listBox = new Gtk.ListBox({
+            selection_mode: Gtk.SelectionMode.NONE,
+            activate_on_single_click: true,
+        });
+        scrolled.set_child(listBox);
+
+        const refreshList = () => {
+            let child = listBox.get_first_child();
+            while (child) {
+                const next = child.get_next_sibling();
+                listBox.remove(child);
+                child = next;
+            }
+
+            const entries = this._getSavedTextEntries(settings, entriesKey);
+            if (entries.length === 0) {
+                const placeholderRow = new Gtk.ListBoxRow({
+                    selectable: false,
+                    activatable: false,
+                });
+                const placeholderLabel = new Gtk.Label({
+                    label: _('No saved entries yet.'),
+                    xalign: 0,
+                    margin_top: 16,
+                    margin_bottom: 16,
+                    margin_start: 12,
+                    margin_end: 12,
+                });
+                placeholderLabel.add_css_class('dim-label');
+                placeholderRow.set_child(placeholderLabel);
+                listBox.append(placeholderRow);
+                return;
+            }
+
+            entries.forEach((entry, index) => {
+                const row = new Gtk.ListBoxRow({
+                    selectable: false,
+                    activatable: true,
+                });
+                row._entryIndex = index;
+                row.set_tooltip_text(_('Click to load this entry'));
+
+                const rowBox = new Gtk.Box({
+                    orientation: Gtk.Orientation.HORIZONTAL,
+                    spacing: 12,
+                    margin_top: 10,
+                    margin_bottom: 10,
+                    margin_start: 12,
+                    margin_end: 12,
+                });
+                row.set_child(rowBox);
+
+                const textBox = new Gtk.Box({
+                    orientation: Gtk.Orientation.VERTICAL,
+                    spacing: 4,
+                    hexpand: true,
+                });
+                rowBox.append(textBox);
+
+                const nameLabel = new Gtk.Label({
+                    label: entry.name,
+                    xalign: 0,
+                    hexpand: true,
+                });
+                nameLabel.add_css_class('heading');
+                textBox.append(nameLabel);
+
+                const previewLabel = new Gtk.Label({
+                    label: this._getSavedEntryPreview(entry.code),
+                    wrap: true,
+                    xalign: 0,
+                });
+                previewLabel.add_css_class('dim-label');
+                textBox.append(previewLabel);
+
+                const editButton = new Gtk.Button({
+                    icon_name: 'document-edit-symbolic',
+                    valign: Gtk.Align.CENTER,
+                    css_classes: ['flat'],
+                    tooltip_text: _('Edit entry'),
+                });
+                rowBox.append(editButton);
+
+                const renameButton = new Gtk.Button({
+                    icon_name: 'document-properties-symbolic',
+                    valign: Gtk.Align.CENTER,
+                    css_classes: ['flat'],
+                    tooltip_text: _('Rename entry'),
+                });
+                rowBox.append(renameButton);
+
+                editButton.connect('clicked', () => {
+                    const currentEntries = this._getSavedTextEntries(settings, entriesKey);
+                    const currentEntry = currentEntries[index];
+                    if (!currentEntry)
+                        return;
+
+                    this._showTextEditDialog(
+                        window,
+                        settings,
+                        null,
+                        _('%s Entry').format(title),
+                        _('Edit the saved entry code.'),
+                        {
+                            initialText: currentEntry.code,
+                            primarySaveLabel: _('Save Entry'),
+                            persistCurrentValue: false,
+                            onSave: text => {
+                                const updatedEntries = this._getSavedTextEntries(settings, entriesKey);
+                                if (!updatedEntries[index])
+                                    return;
+                                updatedEntries[index].code = text;
+                                this._setSavedTextEntries(settings, entriesKey, updatedEntries);
+                            },
+                        }
+                    );
+                });
+
+                renameButton.connect('clicked', () => {
+                    const currentEntries = this._getSavedTextEntries(settings, entriesKey);
+                    const currentEntry = currentEntries[index];
+                    if (!currentEntry)
+                        return;
+
+                    this._promptForSavedEntryName(window, {
+                        title: _('Rename Entry'),
+                        description: _('Choose a new name for this saved entry.'),
+                        initialName: currentEntry.name,
+                        entries: currentEntries,
+                        excludeIndex: index,
+                        acceptLabel: _('Rename'),
+                        onConfirm: name => {
+                            const updatedEntries = this._getSavedTextEntries(settings, entriesKey);
+                            if (!updatedEntries[index])
+                                return;
+                            updatedEntries[index].name = name;
+                            this._setSavedTextEntries(settings, entriesKey, updatedEntries);
+                        },
+                    });
+                });
+
+                listBox.append(row);
+            });
+        };
+
+        listBox.connect('row-activated', (box, row) => {
+            const index = row?._entryIndex;
+            if (!Number.isInteger(index))
+                return;
+
+            const entries = this._getSavedTextEntries(settings, entriesKey);
+            const entry = entries[index];
+            if (!entry)
+                return;
+
+            settings.set_string(settingsKey, entry.code);
+            dialog.destroy();
+        });
+
+        addButton.connect('clicked', () => {
+            const currentEntries = this._getSavedTextEntries(settings, entriesKey);
+            this._promptForSavedEntryName(window, {
+                title: _('New Entry'),
+                description: _('Choose a name for the new saved entry.'),
+                entries: currentEntries,
+                acceptLabel: _('Continue'),
+                onConfirm: name => {
+                    this._showTextEditDialog(
+                        window,
+                        settings,
+                        null,
+                        _('%s Entry').format(title),
+                        _('Enter the code for the new saved entry.'),
+                        {
+                            initialText: '',
+                            primarySaveLabel: _('Create Entry'),
+                            persistCurrentValue: false,
+                            onSave: text => {
+                                const updatedEntries = this._getSavedTextEntries(settings, entriesKey);
+                                updatedEntries.push({ name, code: text });
+                                this._setSavedTextEntries(settings, entriesKey, updatedEntries);
+                            },
+                        }
+                    );
+                },
+            });
+        });
+
+        const changedId = settings.connect(`changed::${entriesKey}`, refreshList);
+        dialog.connect('destroy', () => {
+            try {
+                settings.disconnect(changedId);
+            } catch (e) {
+                // Ignore disconnect errors
+            }
+        });
+
+        refreshList();
+        dialog.present();
+    }
+
+    _showTextEditDialog(window, settings, settingsKey, title, description, options = {}) {
         const dialog = new Gtk.Dialog({
             title,
             modal: true,
@@ -1015,7 +1506,16 @@ export default class StealthLockPreferences extends ExtensionPreferences {
         });
 
         dialog.add_button(_('Cancel'), Gtk.ResponseType.CANCEL);
-        dialog.add_button(_('Save'), Gtk.ResponseType.OK);
+        const RESPONSE_SAVE_AS_ENTRY = 1001;
+        const RESPONSE_REPLACE_ENTRY = 1002;
+        const supportsSavedEntries = !!(settingsKey && options.entriesKey);
+        let replaceEntryButton = null;
+        if (supportsSavedEntries) {
+            dialog.add_button(_('Save As New Entry'), RESPONSE_SAVE_AS_ENTRY);
+            replaceEntryButton = dialog.add_button(_('Replace Entry'), RESPONSE_REPLACE_ENTRY);
+            replaceEntryButton.sensitive = this._getSavedTextEntries(settings, options.entriesKey).length > 0;
+        }
+        dialog.add_button(options.primarySaveLabel ?? _('Save'), Gtk.ResponseType.OK);
 
         const contentArea = dialog.get_content_area();
         contentArea.set_margin_top(12);
@@ -1047,20 +1547,86 @@ export default class StealthLockPreferences extends ExtensionPreferences {
         contentArea.append(scrolled);
 
         const buffer = textView.get_buffer();
-        buffer.set_text(settings.get_string(settingsKey) ?? '', -1);
+        const initialText = Object.prototype.hasOwnProperty.call(options, 'initialText')
+            ? options.initialText
+            : (settingsKey ? (settings.get_string(settingsKey) ?? '') : '');
+        buffer.set_text(initialText, -1);
+
+        const getBufferText = () => {
+            const start = buffer.get_start_iter();
+            const end = buffer.get_end_iter();
+            return buffer.get_text(start, end, false);
+        };
+
+        const persistCurrentValue = text => {
+            const shouldPersist = options.persistCurrentValue ?? !!settingsKey;
+            if (shouldPersist && settingsKey)
+                settings.set_string(settingsKey, text);
+        };
+
+        const savePrimaryText = text => {
+            if (typeof options.onSave === 'function') {
+                options.onSave(text);
+            } else {
+                persistCurrentValue(text);
+            }
+        };
 
         dialog.connect('response', (d, response) => {
             try {
                 if (response === Gtk.ResponseType.OK) {
-                    const start = buffer.get_start_iter();
-                    const end = buffer.get_end_iter();
-                    const text = buffer.get_text(start, end, false);
-                    settings.set_string(settingsKey, text);
+                    savePrimaryText(getBufferText());
+                    return;
+                }
+
+                if (response === RESPONSE_SAVE_AS_ENTRY && supportsSavedEntries) {
+                    const text = getBufferText();
+                    const entries = this._getSavedTextEntries(settings, options.entriesKey);
+                    this._promptForSavedEntryName(window, {
+                        title: _('Save As New Entry'),
+                        description: _('Choose a name for the new saved entry.'),
+                        initialName: title,
+                        entries,
+                        acceptLabel: _('Save'),
+                        onConfirm: name => {
+                            const updatedEntries = this._getSavedTextEntries(settings, options.entriesKey);
+                            updatedEntries.push({ name, code: text });
+                            this._setSavedTextEntries(settings, options.entriesKey, updatedEntries);
+                            persistCurrentValue(text);
+                            d.destroy();
+                        },
+                    });
+                    return;
+                }
+
+                if (response === RESPONSE_REPLACE_ENTRY && supportsSavedEntries) {
+                    const entries = this._getSavedTextEntries(settings, options.entriesKey);
+                    if (entries.length === 0)
+                        return;
+
+                    const text = getBufferText();
+                    this._promptForSavedEntrySelection(
+                        window,
+                        _('Replace Saved Entry'),
+                        _('Choose which saved entry should be replaced with the current editor content.'),
+                        entries,
+                        index => {
+                            const updatedEntries = this._getSavedTextEntries(settings, options.entriesKey);
+                            if (!updatedEntries[index])
+                                return;
+                            updatedEntries[index].code = text;
+                            this._setSavedTextEntries(settings, options.entriesKey, updatedEntries);
+                            persistCurrentValue(text);
+                            d.destroy();
+                        }
+                    );
+                    return;
                 }
             } catch (e) {
                 // Ignore
             } finally {
-                d.destroy();
+                if (response !== RESPONSE_SAVE_AS_ENTRY && response !== RESPONSE_REPLACE_ENTRY)
+                    d.destroy();
             }
         });
 
