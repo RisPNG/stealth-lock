@@ -139,9 +139,45 @@ class StealthLockOverlay extends St.Widget {
         this._screenshots = [];
         this._originX = 0;
         this._originY = 0;
+        this._backgroundLayer = new St.Widget({
+            name: 'stealthLockBackgroundLayer',
+            style_class: 'stealth-lock-background-layer',
+            reactive: false,
+            can_focus: false,
+            track_hover: false,
+        });
+        this._backgroundBackdrop = new St.Widget({
+            name: 'stealthLockBackgroundBackdrop',
+            style_class: 'stealth-lock-background-backdrop',
+            reactive: false,
+            can_focus: false,
+            track_hover: false,
+        });
+        this.add_child(this._backgroundLayer);
+        this.add_child(this._backgroundBackdrop);
         
         // Connect to allocation to ensure proper sizing
         this.connect('notify::allocation', () => this._updateLayout());
+    }
+
+    getBackgroundLayer() {
+        return this._backgroundLayer;
+    }
+
+    getBackgroundBackdrop() {
+        return this._backgroundBackdrop;
+    }
+
+    getBackgroundEntries() {
+        return this._screenshots.map(ss => ({
+            actor: ss.widget,
+            file: ss.file,
+            monitor: ss.monitor,
+            x: ss.widget?.x ?? 0,
+            y: ss.widget?.y ?? 0,
+            width: ss.widget?.width ?? 0,
+            height: ss.widget?.height ?? 0,
+        }));
     }
     
     async captureScreens() {
@@ -178,6 +214,8 @@ class StealthLockOverlay extends St.Widget {
 
         // Create background with the screenshot
         const bg = new St.Widget({
+            name: `stealthLockBackgroundMonitor${index}`,
+            style_class: 'stealth-lock-background-monitor',
             x: monitor.x - this._originX,
             y: monitor.y - this._originY,
             width: monitor.width,
@@ -191,7 +229,7 @@ class StealthLockOverlay extends St.Widget {
             monitor: index,
         });
 
-        this.add_child(bg);
+        this._backgroundLayer.add_child(bg);
         return true;
     }
 
@@ -333,6 +371,10 @@ class StealthLockOverlay extends St.Widget {
 
         this.set_position(rect.x, rect.y);
         this.set_size(rect.width, rect.height);
+        this._backgroundLayer.set_position(0, 0);
+        this._backgroundLayer.set_size(rect.width, rect.height);
+        this._backgroundBackdrop.set_position(0, 0);
+        this._backgroundBackdrop.set_size(rect.width, rect.height);
     }
     
     destroy() {
@@ -394,6 +436,8 @@ export default class StealthLockExtension extends Extension {
         this._passwordPromptLastStageX = null;
         this._passwordPromptLastStageY = null;
         this._passwordPromptCustomFn = null;
+        this._passwordPromptCustomState = null;
+        this._passwordPromptCustomInitialized = false;
         this._passwordInputEntry = null;
         this._passwordInputChangedId = null;
         this._passwordInputSyncing = false;
@@ -435,6 +479,12 @@ export default class StealthLockExtension extends Extension {
         );
         this._settingsChangedIds.push(
             this._settings.connect('changed::debug-show-info', () => this._syncDebugOverlay())
+        );
+        this._settingsChangedIds.push(
+            this._settings.connect('changed::normal-prompt-css', () => this._applyPasswordPromptStyle())
+        );
+        this._settingsChangedIds.push(
+            this._settings.connect('changed::normal-background-css', () => this._syncCustomUiStyles())
         );
         
         console.log('Stealth Lock extension enabled');
@@ -878,6 +928,7 @@ export default class StealthLockExtension extends Extension {
 
             // Ensure the overlay has a valid size/position immediately
             this._overlay._updateLayout?.();
+            this._startPasswordPromptCustomSession();
 
             // 4. Grab input globally (real lock)
             this._modalGrab = Main.pushModal(this._overlay, {
@@ -949,6 +1000,18 @@ export default class StealthLockExtension extends Extension {
         // 3b. Remove password prompt
         this._destroyPasswordPrompt();
         this._destroyPasswordInputCapture();
+        if (this._passwordPromptCustomInitialized) {
+            const masked = PASSWORD_BULLET.repeat(this._passwordBuffer.length);
+            this._dispatchPasswordPromptCustomEvent('destroy', {
+                prompt: null,
+                text: null,
+                revealButton: null,
+                buffer: this._passwordBuffer,
+                masked,
+                revealed: this._passwordPromptRevealed,
+            });
+        }
+        this._clearPasswordPromptCustomSession();
 
         // 4. Remove overlay
         if (this._overlay) {
@@ -2054,6 +2117,172 @@ export default class StealthLockExtension extends Extension {
         }
     }
 
+    _getNormalPromptCss() {
+        try {
+            return this._settings?.get_string('normal-prompt-css') ?? '';
+        } catch (e) {
+            return '';
+        }
+    }
+
+    _getNormalBackgroundCss() {
+        try {
+            return this._settings?.get_string('normal-background-css') ?? '';
+        } catch (e) {
+            return '';
+        }
+    }
+
+    _startPasswordPromptCustomSession() {
+        this._passwordPromptCustomState = {};
+        this._passwordPromptCustomInitialized = false;
+        this._compileNormalPromptCustomJs();
+    }
+
+    _clearPasswordPromptCustomSession() {
+        this._passwordPromptCustomFn = null;
+        this._passwordPromptCustomState = null;
+        this._passwordPromptCustomInitialized = false;
+    }
+
+    _applyPasswordPromptStyle() {
+        if (!this._passwordPrompt)
+            return;
+
+        const isDark = this._isSystemDarkTheme();
+        const css = this._getNormalPromptCss();
+        if (css.trim())
+            this._passwordPrompt.style = css;
+        else if (isDark)
+            this._passwordPrompt.style = 'background-color: #2d2d2d; border-color: #555555;';
+        else
+            this._passwordPrompt.style = '';
+
+        if (this._locked)
+            this._updatePasswordPromptPosition();
+    }
+
+    _syncCustomUiStyles() {
+        const background = this._overlay?.getBackgroundBackdrop?.();
+        if (!background)
+            return;
+
+        const css = this._getNormalBackgroundCss();
+        background.style = css.trim() ? css : '';
+    }
+
+    _getCustomEffectStore(actor) {
+        if (!actor)
+            return null;
+
+        if (!actor._stealthLockNamedEffects)
+            actor._stealthLockNamedEffects = {};
+        return actor._stealthLockNamedEffects;
+    }
+
+    _ensureBlurEffect(actor, options = {}) {
+        if (!actor || !Shell.BlurEffect)
+            return null;
+
+        const name = typeof options?.name === 'string' && options.name.trim()
+            ? options.name.trim()
+            : 'stealth-lock-blur';
+        const store = this._getCustomEffectStore(actor);
+        let effect = actor.get_effect?.(name) ?? store?.[name] ?? null;
+
+        if (!effect || typeof effect.set_mode !== 'function' || typeof effect.set_radius !== 'function') {
+            if (effect) {
+                try {
+                    if (actor.remove_effect_by_name)
+                        actor.remove_effect_by_name(name);
+                    else if (actor.remove_effect)
+                        actor.remove_effect(effect);
+                } catch (e) {}
+            }
+
+            effect = new Shell.BlurEffect();
+            if (actor.add_effect_with_name)
+                actor.add_effect_with_name(name, effect);
+            else if (actor.add_effect)
+                actor.add_effect(effect);
+
+            if (store)
+                store[name] = effect;
+        }
+
+        const mode = `${options?.mode ?? 'background'}`.trim().toLowerCase() === 'actor'
+            ? Shell.BlurMode.ACTOR
+            : Shell.BlurMode.BACKGROUND;
+        effect.mode = mode;
+
+        if (Number.isFinite(options?.radius))
+            effect.radius = Math.max(0, Math.round(options.radius));
+
+        if (Number.isFinite(options?.brightness))
+            effect.brightness = Math.max(0, Number(options.brightness));
+
+        return effect;
+    }
+
+    _removeNamedEffect(actor, name = 'stealth-lock-blur') {
+        if (!actor)
+            return;
+
+        const store = this._getCustomEffectStore(actor);
+        const effect = actor.get_effect?.(name) ?? store?.[name] ?? null;
+        if (!effect)
+            return;
+
+        try {
+            if (actor.remove_effect_by_name)
+                actor.remove_effect_by_name(name);
+            else if (actor.remove_effect)
+                actor.remove_effect(effect);
+        } catch (e) {}
+
+        if (store)
+            delete store[name];
+    }
+
+    _buildNormalPromptCustomJsContext(event, extra = {}) {
+        const overlay = this._overlay;
+        const backgroundEntries = overlay?.getBackgroundEntries?.() ?? [];
+        const state = this._passwordPromptCustomState ?? (this._passwordPromptCustomState = {});
+        const effects = {
+            ensureBlur: (actor, options = {}) => this._ensureBlurEffect(actor, options),
+            remove: (actor, name = 'stealth-lock-blur') => this._removeNamedEffect(actor, name),
+        };
+
+        return {
+            event,
+            overlay,
+            background: overlay?.getBackgroundBackdrop?.() ?? null,
+            backgroundBackdrop: overlay?.getBackgroundBackdrop?.() ?? null,
+            backgroundLayer: overlay?.getBackgroundLayer?.() ?? null,
+            backgrounds: backgroundEntries,
+            backgroundActors: backgroundEntries.map(entry => entry.actor).filter(actor => !!actor),
+            freezeDisplay: this._shouldFreezeDisplay(),
+            lockType: this._getLockType(),
+            followCursor: this._shouldNormalPromptFollowCursor(),
+            promptFollowCursor: this._shouldNormalPromptFollowCursor(),
+            promptAnchor: this._getNormalPromptAnchor(),
+            promptOffsets: this._getNormalPromptOffsets(),
+            promptFixedPosition: this._getNormalPromptFixedPosition(),
+            monitors: (Main.layoutManager.monitors ?? []).map((m, index) => ({
+                x: m.x,
+                y: m.y,
+                width: m.width,
+                height: m.height,
+                index,
+            })),
+            state,
+            effects,
+            settings: this._settings,
+            gi: { St, Clutter, GLib, GObject, Gio, Shell, Meta, Cogl, cairo: _cairo },
+            ...extra,
+        };
+    }
+
     _compileNormalPromptCustomJs() {
         this._passwordPromptCustomFn = null;
         if (!this._settings)
@@ -2090,12 +2319,34 @@ export default class StealthLockExtension extends Extension {
         }
     }
 
+    _dispatchPasswordPromptCustomEvent(event, extra = {}) {
+        if (!this._passwordPromptCustomFn)
+            return;
+
+        this._runNormalPromptCustomJs(this._buildNormalPromptCustomJsContext(event, extra));
+
+        if (event === 'init')
+            this._passwordPromptCustomInitialized = true;
+        else if (event === 'destroy')
+            this._passwordPromptCustomInitialized = false;
+    }
+
     _syncPasswordPrompt() {
         if (!this._locked || !this._overlay)
             return;
 
+        this._syncCustomUiStyles();
+
         if (!this._isNormalLockType()) {
             this._destroyPasswordPrompt();
+            if (!this._passwordPromptCustomInitialized) {
+                this._dispatchPasswordPromptCustomEvent('init', {
+                    prompt: null,
+                    text: null,
+                    revealButton: null,
+                    revealed: false,
+                });
+            }
             return;
         }
 
@@ -2148,7 +2399,6 @@ export default class StealthLockExtension extends Extension {
             return;
 
         this._passwordPromptRevealed = false;
-        this._compileNormalPromptCustomJs();
 
         const prompt = new St.BoxLayout({
             name: 'stealthLockPasswordPrompt',
@@ -2195,37 +2445,24 @@ export default class StealthLockExtension extends Extension {
             revealIcon.style = 'color: #aaaaaa;';
         }
 
-        // User CSS override (inline) takes priority over dark defaults.
-        try {
-            const css = this._settings?.get_string('normal-prompt-css') ?? '';
-            if (css.trim())
-                prompt.style = css;
-            else if (isDark)
-                prompt.style = 'background-color: #2d2d2d; border-color: #555555;';
-        } catch (e) {
-            if (isDark)
-                prompt.style = 'background-color: #2d2d2d; border-color: #555555;';
-        }
-
         this._passwordPrompt = prompt;
         this._passwordPromptText = text;
         this._passwordPromptRevealButton = revealButton;
         this._passwordPromptRevealIcon = revealIcon;
 
         this._overlay.add_child(prompt);
+        this._applyPasswordPromptStyle();
+        this._syncCustomUiStyles();
 
         // Raise cursor actor above the prompt so it renders on top
         if (this._cursorActor && this._overlay.contains(this._cursorActor))
             this._overlay.set_child_above_sibling(this._cursorActor, prompt);
 
-        this._runNormalPromptCustomJs({
-            event: 'init',
+        this._dispatchPasswordPromptCustomEvent('init', {
             prompt,
             text,
             revealButton,
             revealed: this._passwordPromptRevealed,
-            settings: this._settings,
-            gi: { St, Clutter, GLib, GObject, cairo: _cairo },
         });
     }
 
@@ -2241,6 +2478,15 @@ export default class StealthLockExtension extends Extension {
         this._promptCursorMotionId = null;
 
         if (this._passwordPrompt) {
+            const masked = PASSWORD_BULLET.repeat(this._passwordBuffer.length);
+            this._dispatchPasswordPromptCustomEvent('destroy', {
+                prompt: this._passwordPrompt,
+                text: this._passwordPromptText,
+                revealButton: this._passwordPromptRevealButton,
+                buffer: this._passwordBuffer,
+                masked,
+                revealed: this._passwordPromptRevealed,
+            });
             try {
                 this._passwordPrompt.destroy();
             } catch (e) {
@@ -2255,31 +2501,28 @@ export default class StealthLockExtension extends Extension {
         this._passwordPromptRevealed = false;
         this._passwordPromptLastStageX = null;
         this._passwordPromptLastStageY = null;
-        this._passwordPromptCustomFn = null;
     }
 
     _updatePasswordPrompt() {
-        if (!this._passwordPrompt || !this._passwordPromptText)
+        if (!this._passwordPromptCustomFn && (!this._passwordPrompt || !this._passwordPromptText))
             return;
 
         const masked = PASSWORD_BULLET.repeat(this._passwordBuffer.length);
         const displayText = this._passwordPromptRevealed ? this._passwordBuffer : masked;
-        this._passwordPromptText.text = displayText;
+        if (this._passwordPromptText)
+            this._passwordPromptText.text = displayText;
 
-        this._runNormalPromptCustomJs({
-            event: 'update',
+        this._dispatchPasswordPromptCustomEvent('update', {
             prompt: this._passwordPrompt,
             text: this._passwordPromptText,
             revealButton: this._passwordPromptRevealButton,
             buffer: this._passwordBuffer,
             masked,
             revealed: this._passwordPromptRevealed,
-            settings: this._settings,
-            gi: { St, Clutter, GLib, GObject, cairo: _cairo },
         });
 
-        // Re-clamp/re-anchor if size changed (e.g. more bullets).
-        this._updatePasswordPromptPosition();
+        if (this._passwordPrompt)
+            this._updatePasswordPromptPosition();
     }
 
     _updatePasswordPromptPosition() {

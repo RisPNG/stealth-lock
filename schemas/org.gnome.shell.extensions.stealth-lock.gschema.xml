@@ -172,7 +172,7 @@
       <default>''</default>
       <summary>Normal Prompt CSS</summary>
       <description>
-        Optional inline CSS applied to the password prompt container in Normal lock type.
+        Optional inline CSS applied to the password prompt container when one is shown.
       </description>
     </key>
 
@@ -185,11 +185,28 @@
       </description>
     </key>
 
+    <key name="normal-background-css" type="s">
+      <default>''</default>
+      <summary>Normal Background CSS</summary>
+      <description>
+        Optional inline CSS applied to the full-screen background actor while locked.
+      </description>
+    </key>
+
+    <key name="normal-background-css-saved-entries" type="s">
+      <default>'[]'</default>
+      <summary>Normal Background CSS Saved Entries</summary>
+      <description>
+        JSON array of saved Custom CSS entries for the Normal background editor.
+        Each entry stores a name and code snippet.
+      </description>
+    </key>
+
     <key name="normal-prompt-custom-js" type="s">
       <default>''</default>
       <summary>Normal Prompt Custom JS</summary>
       <description>
-        Optional JavaScript snippet executed for the password prompt (Normal lock type).
+        Optional JavaScript snippet executed for the lock UI while locked.
         Receives a context object; use with care.
       </description>
     </key>

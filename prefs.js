@@ -415,8 +415,8 @@ export default class StealthLockPreferences extends ExtensionPreferences {
         passwordGroup.add(fixedYRow);
 
         const customCssRow = new Adw.ActionRow({
-            title: _('Custom CSS'),
-            subtitle: _('Override prompt styling (inline CSS)'),
+            title: _('Prompt CSS'),
+            subtitle: _('Override prompt container styling when a prompt is shown'),
         });
         const editCssButton = new Gtk.Button({
             icon_name: 'document-edit-symbolic',
@@ -432,11 +432,31 @@ export default class StealthLockPreferences extends ExtensionPreferences {
         });
         customCssRow.add_suffix(savedCssButton);
         customCssRow.activatable_widget = editCssButton;
-        passwordGroup.add(customCssRow);
+        featuresGroup.add(customCssRow);
+
+        const backgroundCssRow = new Adw.ActionRow({
+            title: _('Background CSS'),
+            subtitle: _('Override the full-screen background actor styling (inline CSS)'),
+        });
+        const editBackgroundCssButton = new Gtk.Button({
+            icon_name: 'document-edit-symbolic',
+            valign: Gtk.Align.CENTER,
+            css_classes: ['flat'],
+        });
+        backgroundCssRow.add_suffix(editBackgroundCssButton);
+        const savedBackgroundCssButton = new Gtk.Button({
+            icon_name: 'view-list-symbolic',
+            valign: Gtk.Align.CENTER,
+            css_classes: ['flat'],
+            tooltip_text: _('Saved entries'),
+        });
+        backgroundCssRow.add_suffix(savedBackgroundCssButton);
+        backgroundCssRow.activatable_widget = editBackgroundCssButton;
+        featuresGroup.add(backgroundCssRow);
 
         const customJsRow = new Adw.ActionRow({
             title: _('Custom JS'),
-            subtitle: _('Run custom JS to modify the prompt (advanced, use with care)'),
+            subtitle: _('Run custom JS to modify the prompt, background, or overlay (advanced, use with care)'),
         });
         const editJsButton = new Gtk.Button({
             icon_name: 'document-edit-symbolic',
@@ -452,7 +472,7 @@ export default class StealthLockPreferences extends ExtensionPreferences {
         });
         customJsRow.add_suffix(savedJsButton);
         customJsRow.activatable_widget = editJsButton;
-        passwordGroup.add(customJsRow);
+        featuresGroup.add(customJsRow);
 
         const syncPasswordUi = () => {
             const isNormal = settings.get_string('lock-type') === 'normal';
@@ -468,12 +488,6 @@ export default class StealthLockPreferences extends ExtensionPreferences {
             fixedXRow.sensitive = isNormal && !follow;
             fixedYRow.sensitive = isNormal && !follow;
 
-            customCssRow.sensitive = isNormal;
-            editCssButton.sensitive = isNormal;
-            savedCssButton.sensitive = isNormal;
-            customJsRow.sensitive = isNormal;
-            editJsButton.sensitive = isNormal;
-            savedJsButton.sensitive = isNormal;
         };
 
         const syncAnchorSelected = () => {
@@ -542,10 +556,23 @@ export default class StealthLockPreferences extends ExtensionPreferences {
                 window,
                 settings,
                 'normal-prompt-css',
-                _('Custom CSS'),
-                _('Inline CSS applied to the Normal password prompt container.'),
+                _('Prompt CSS'),
+                _('Inline CSS applied to the password prompt container when it is shown.'),
                 {
                     entriesKey: 'normal-prompt-css-saved-entries',
+                }
+            );
+        });
+
+        editBackgroundCssButton.connect('clicked', () => {
+            this._showTextEditDialog(
+                window,
+                settings,
+                'normal-background-css',
+                _('Background CSS'),
+                _('Inline CSS applied to the full-screen background actor.'),
+                {
+                    entriesKey: 'normal-background-css-saved-entries',
                 }
             );
         });
@@ -556,7 +583,7 @@ export default class StealthLockPreferences extends ExtensionPreferences {
                 settings,
                 'normal-prompt-custom-js',
                 _('Custom JS'),
-                _('Advanced: runs inside GNOME Shell. The code receives a single object `ctx` with fields like `ctx.event`, `ctx.prompt`, `ctx.text`, `ctx.revealButton`, `ctx.buffer`, `ctx.masked`, `ctx.revealed`.'),
+                _('Advanced: runs inside GNOME Shell. The code receives a single object `ctx` with fields like `ctx.event`, `ctx.prompt`, `ctx.background`, `ctx.backgroundLayer`, `ctx.backgrounds`, `ctx.overlay`, `ctx.state`, and `ctx.effects.ensureBlur(...)`.'),
                 {
                     entriesKey: 'normal-prompt-custom-js-saved-entries',
                 }
@@ -569,8 +596,19 @@ export default class StealthLockPreferences extends ExtensionPreferences {
                 settings,
                 'normal-prompt-css',
                 'normal-prompt-css-saved-entries',
-                _('Custom CSS'),
-                _('Click an entry to load it into the current Custom CSS value.')
+                _('Prompt CSS'),
+                _('Click an entry to load it into the current Prompt CSS value.')
+            );
+        });
+
+        savedBackgroundCssButton.connect('clicked', () => {
+            this._showSavedTextEntriesDialog(
+                window,
+                settings,
+                'normal-background-css',
+                'normal-background-css-saved-entries',
+                _('Background CSS'),
+                _('Click an entry to load it into the current Background CSS value.')
             );
         });
 

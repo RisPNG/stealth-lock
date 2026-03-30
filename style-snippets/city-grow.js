@@ -1,8 +1,6 @@
-// Maze Clock - CityGrow-style animated city background with configurable prompt + clock monitor target.
-// Paste into: Extensions > Stealth Lock > Normal Prompt Custom JS
+// City Grow by HobbyBlobby inspired animated city background with configurable prompt + clock monitor target.
+// Paste into: Extensions > Stealth Lock > Custom JS
 // Leave "Normal Prompt CSS" empty.
-//
-// Requires: lock-type = "normal"
 //
 // KNOBS ---------------------------------------------------------------------
 
@@ -19,7 +17,7 @@ const PROMPT_TEXT_STYLE =
   'color: rgba(255,255,255,0.9); font-size: 20px; min-width: 220px; min-height: 24px; font-weight: 500; font-family: "Monaspace Krypton NF";';
 const REVEAL_ICON_STYLE = 'color: rgba(255,255,255,0.5); icon-size: 20px;';
 
-// CityGrow-style simulation knobs
+// City Grow simulation knobs
 const CITY_SCALE = 3;
 const CITY_START_BRANCHES = 3;
 const CITY_LINE_WIDTH = 2;
@@ -79,21 +77,23 @@ const CLOCK_MONITOR_MODE = 'settings';
 const CLOCK_MANUAL_MONITOR_INDEX = 0;
 
 if (ctx.event === 'init') {
-  if (ctx.prompt._maze) return;
+  if (ctx.state.maze) return;
 
   const { St, GLib, cairo: Cairo, Clutter, Pango } = ctx.gi;
   if (!Cairo) return;
 
-  const overlay = ctx.prompt.get_parent();
+  const overlay = ctx.overlay;
   if (!overlay) return;
+  const backgroundLayer = ctx.backgroundLayer || overlay;
+  const prompt = ctx.prompt;
 
   const w = overlay.width || global.stage.width || 1920;
   const h = overlay.height || global.stage.height || 1080;
 
   // Prompt style/state
-  if (SHOW_PASSWORD_FIELD) {
-    ctx.prompt.style = PROMPT_STYLE_VISIBLE;
-    ctx.prompt.reactive = true;
+  if (prompt && SHOW_PASSWORD_FIELD) {
+    prompt.style = PROMPT_STYLE_VISIBLE;
+    prompt.reactive = true;
 
     if (ctx.text) {
       ctx.text.visible = true;
@@ -110,9 +110,9 @@ if (ctx.event === 'init') {
           icon.style = REVEAL_ICON_STYLE;
       }
     }
-  } else {
-    ctx.prompt.style = PROMPT_STYLE_HIDDEN;
-    ctx.prompt.reactive = false;
+  } else if (prompt) {
+    prompt.style = PROMPT_STYLE_HIDDEN;
+    prompt.reactive = false;
 
     if (ctx.text)
       ctx.text.visible = false;
@@ -538,7 +538,7 @@ if (ctx.event === 'init') {
   const mazeArea = new St.DrawingArea();
   mazeArea.set_size(w, h);
   mazeArea.set_position(0, 0);
-  overlay.insert_child_below(mazeArea, ctx.prompt);
+  backgroundLayer.add_child(mazeArea);
 
   mazeArea.connect('repaint', () => {
     const cr = mazeArea.get_context();
@@ -591,7 +591,13 @@ if (ctx.event === 'init') {
       clock.add_child(dLbl);
     }
 
-    overlay.insert_child_below(clock, ctx.prompt);
+    overlay.add_child(clock);
+    if (prompt)
+      overlay.set_child_below_sibling(clock, prompt);
+    else if (ctx.background)
+      overlay.set_child_above_sibling(clock, ctx.background);
+    else if (mazeArea)
+      overlay.set_child_above_sibling(clock, mazeArea);
   }
 
   function getCombinedRect() {
@@ -721,26 +727,49 @@ if (ctx.event === 'init') {
     return true;
   });
 
-  // Cleanup on destroy
-  ctx.prompt._maze = { mazeArea, clock, tid };
-  ctx.prompt.connect('destroy', () => {
-    const m = ctx.prompt._maze;
-    if (!m) return;
-    try { GLib.source_remove(m.tid); } catch (e) {}
-    try { surf.finish(); } catch (e) {}
-    if (m.clock) {
-      try { m.clock.destroy(); } catch (e) {}
-    }
-    try { m.mazeArea.destroy(); } catch (e) {}
-    ctx.prompt._maze = null;
-  });
+  ctx.state.maze = { mazeArea, clock, tid, surf };
 }
 
 if (ctx.event === 'update') {
-  if (!SHOW_PASSWORD_FIELD) {
+  if (ctx.prompt && !SHOW_PASSWORD_FIELD) {
+    ctx.prompt.style = PROMPT_STYLE_HIDDEN;
+    ctx.prompt.reactive = false;
     if (TEXT_CLEAR_WHEN_HIDDEN && ctx.text)
       ctx.text.text = '';
-  } else if (ctx.text) {
-    ctx.text.style = PROMPT_TEXT_STYLE;
+    if (ctx.text)
+      ctx.text.visible = false;
+    if (ctx.revealButton) {
+      ctx.revealButton.visible = false;
+      ctx.revealButton.reactive = false;
+    }
+  } else if (ctx.prompt && SHOW_PASSWORD_FIELD) {
+    ctx.prompt.style = PROMPT_STYLE_VISIBLE;
+    ctx.prompt.reactive = true;
+    if (ctx.text) {
+      ctx.text.visible = true;
+      ctx.text.style = PROMPT_TEXT_STYLE;
+    }
+    if (ctx.revealButton) {
+      const revealVisible = SHOW_REVEAL_BUTTON_WITH_PASSWORD_FIELD;
+      ctx.revealButton.visible = revealVisible;
+      ctx.revealButton.reactive = revealVisible;
+      if (revealVisible) {
+        const icon = ctx.revealButton.get_child();
+        if (icon)
+          icon.style = REVEAL_ICON_STYLE;
+      }
+    }
   }
+}
+
+if (ctx.event === 'destroy') {
+  const m = ctx.state.maze;
+  if (!m) return;
+  try { ctx.gi.GLib.source_remove(m.tid); } catch (e) {}
+  try { m.surf.finish(); } catch (e) {}
+  if (m.clock) {
+    try { m.clock.destroy(); } catch (e) {}
+  }
+  try { m.mazeArea.destroy(); } catch (e) {}
+  ctx.state.maze = null;
 }
