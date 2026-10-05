@@ -1,0 +1,7 @@
+version = 1
+
+[[annotations]]
+path = ["*.js", "*.py", "*.sh", "*.json", "*.css", "*.md", ".gitignore", "REUSE.toml", "schemas/*.gschema.xml", "scripts/**", "tests/**", "po/**", ".github/**"]
+precedence = "aggregate"
+SPDX-FileCopyrightText = "RisPNG"
+SPDX-License-Identifier = "GPL-3.0-only"

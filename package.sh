@@ -1,52 +1,58 @@
-#!/bin/bash
-#
-# Stealth Lock Extension - Packaging Script
-#
-# Creates a distributable zip file of the extension
-#
+#!/usr/bin/env bash
 
-set -e
+set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-EXTENSION_UUID="stealth-lock@user"
-VERSION=$(grep -oP '"version":\s*\K\d+' "$SCRIPT_DIR/metadata.json")
-OUTPUT_FILE="${EXTENSION_UUID}-v${VERSION}.zip"
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+read -r extension_uuid version < <(/usr/bin/python3 - "$script_dir/metadata.json" <<'PY'
+import json
+import sys
 
-echo "Packaging Stealth Lock Extension v${VERSION}..."
+with open(sys.argv[1], encoding="utf-8") as metadata_file:
+    metadata = json.load(metadata_file)
+print(metadata["uuid"], metadata["version"])
+PY
+)
 
-cd "$SCRIPT_DIR"
-
-# Ensure schemas are compiled
-if [ -d "schemas" ]; then
-    echo "Compiling schemas..."
-    glib-compile-schemas schemas/
+if [[ $# -gt 1 ]]; then
+    echo "Usage: $0 [output.zip]" >&2
+    exit 2
 fi
 
-# Create zip file
-echo "Creating $OUTPUT_FILE..."
-ZIP_INPUTS=(
+output="${1:-$script_dir/dist/${extension_uuid}-v${version}.zip}"
+mkdir -p "$(dirname "$output")"
+output="$(cd "$(dirname "$output")" && pwd)/$(basename "$output")"
+staging="$(mktemp -d)"
+trap 'rm -rf "$staging"' EXIT
+
+payload=(
     extension.js
+    lockSession.js
+    authentication.js
+    authentication.py
+    screenshot.js
+    overlay.js
+    shell.js
+    input.js
     prefs.js
     metadata.json
     stylesheet.css
-    pam-helper.py
-    polkit-auth-helper.py
+    schemas/org.gnome.shell.extensions.stealth-lock.gschema.xml
+    package.sh
     install.sh
     uninstall.sh
     README.md
+    REVIEW.md
+    LICENSE
+    REUSE.toml
+    LICENSES/GPL-3.0-only.txt
 )
 
-if [ -d "schemas" ]; then
-    ZIP_INPUTS+=(schemas/)
-fi
+for file in "${payload[@]}"; do
+    mkdir -p "$staging/payload/$(dirname "$file")"
+    cp "$script_dir/$file" "$staging/payload/$file"
+done
 
-zip -r "$OUTPUT_FILE" "${ZIP_INPUTS[@]}" -x "*.zip"
-
-echo ""
-echo "Package created: $SCRIPT_DIR/$OUTPUT_FILE"
-echo ""
-echo "To install from zip:"
-echo "  gnome-extensions install $OUTPUT_FILE"
-echo ""
-echo "Or extract manually to:"
-echo "  ~/.local/share/gnome-shell/extensions/$EXTENSION_UUID/"
+glib-compile-schemas --strict "$staging/payload/schemas"
+(cd "$staging/payload" && zip -q -r "$staging/extension.zip" .)
+mv "$staging/extension.zip" "$output"
+echo "$output"

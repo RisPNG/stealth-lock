@@ -1,51 +1,34 @@
-<?xml version="1.0" encoding="UTF-8"?>
+<?xml version='1.0' encoding='UTF-8'?>
 <schemalist>
   <schema id="org.gnome.shell.extensions.stealth-lock" path="/org/gnome/shell/extensions/stealth-lock/">
-    
     <key name="lock-hotkey" type="as">
-      <default><![CDATA[['<Super><Control>l']]]></default>
+      <default>['&lt;Super&gt;&lt;Control&gt;l']</default>
       <summary>Lock Hotkey</summary>
       <description>
         The keyboard shortcut to activate the stealth lock.
         Default is Super+Control+L.
       </description>
     </key>
-
     <key name="debug-mode" type="b">
       <default>false</default>
       <summary>Debug Mode</summary>
-      <description>
-        Enables debugging features such as additional logging and an emergency abort hotkey.
-        When enabled, the abort hotkey will unlock without a password.
-      </description>
+      <description>Enable diagnostics and emergency shortcuts. Emergency actions hand off to GNOME’s native lock and never dismiss the privacy screen without authentication.</description>
     </key>
-
     <key name="debug-abort-hotkey" type="as">
-      <default><![CDATA[['<Control><Alt><Shift>u']]]></default>
+      <default>['&lt;Control&gt;&lt;Alt&gt;&lt;Shift&gt;u']</default>
       <summary>Debug Abort Hotkey</summary>
-      <description>
-        Keyboard shortcut to abort the lock when Debug Mode is enabled.
-        This unlocks without a password and should only be used for debugging.
-      </description>
+      <description>Shortcut to hand off to GNOME’s native lock when diagnostics are enabled. The privacy screen stays active if GNOME cannot lock.</description>
     </key>
-
     <key name="freeze-display" type="b">
       <default>true</default>
       <summary>Freeze Display</summary>
-      <description>
-        When enabled, captures screenshots of all monitors and shows them as an overlay while locked.
-        When disabled, the lock remains active but the display is not frozen.
-      </description>
+      <description>Capture the entire desktop in memory and display the frozen frame. No screenshot files are written.</description>
     </key>
-
     <key name="pause-media" type="b">
       <default>true</default>
       <summary>Pause Media</summary>
-      <description>
-        When enabled, pauses all playing media (MPRIS) on lock and resumes on unlock.
-      </description>
+      <description>Pause playing MPRIS players and resume the same player instances when the privacy screen ends. During a handoff they remain paused until GNOME unlocks.</description>
     </key>
-
     <key name="cursor-mode" type="s">
       <default>'lock-icon'</default>
       <summary>Cursor Mode</summary>
@@ -54,8 +37,12 @@
         Valid values: "lock-icon" (show custom lock cursor), "normal" (leave system cursor),
         "hidden" (hide cursor completely).
       </description>
+      <choices>
+        <choice value="lock-icon" />
+        <choice value="normal" />
+        <choice value="hidden" />
+      </choices>
     </key>
-
     <key name="lock-cursor" type="b">
       <default>true</default>
       <summary>Lock Cursor (Legacy)</summary>
@@ -63,7 +50,6 @@
         Legacy setting retained for migration compatibility with older versions.
       </description>
     </key>
-
     <key name="cursor-bitmap-path" type="s">
       <default>''</default>
       <summary>Cursor Bitmap Path</summary>
@@ -72,7 +58,6 @@
         Leave empty to use the built-in cursor.
       </description>
     </key>
-
     <key name="cursor-fg-rgba" type="au">
       <default>[0, 0, 0, 255]</default>
       <summary>Cursor Foreground RGBA</summary>
@@ -80,7 +65,6 @@
         Foreground (outline/details) color for the built-in lock cursor, stored as [R, G, B, A] 0-255.
       </description>
     </key>
-
     <key name="cursor-bg-rgba" type="au">
       <default>[255, 255, 255, 255]</default>
       <summary>Cursor Background RGBA</summary>
@@ -88,7 +72,6 @@
         Background (fill) color for the built-in lock cursor, stored as [R, G, B, A] 0-255.
       </description>
     </key>
-
     <key name="auto-reset-seconds" type="u">
       <default>5</default>
       <summary>Auto Reset Seconds</summary>
@@ -96,8 +79,8 @@
         Seconds of inactivity before the password buffer is cleared.
         Set to 0 to disable auto reset.
       </description>
+      <range min="0" max="3600" />
     </key>
-
     <key name="lock-type" type="s">
       <default>'stealth'</default>
       <summary>Lock Type</summary>
@@ -105,8 +88,11 @@
         Controls how password entry behaves while locked.
         "stealth" shows no UI, while "normal" shows an on-screen password prompt.
       </description>
+      <choices>
+        <choice value="stealth" />
+        <choice value="normal" />
+      </choices>
     </key>
-
     <key name="normal-prompt-follow-cursor" type="b">
       <default>false</default>
       <summary>Follow Cursor</summary>
@@ -114,7 +100,6 @@
         When enabled (Normal lock type), the password prompt follows the cursor.
       </description>
     </key>
-
     <key name="normal-prompt-cursor-anchor" type="s">
       <default>'br'</default>
       <summary>Cursor Anchor</summary>
@@ -122,8 +107,13 @@
         Where to place the prompt relative to the cursor when following it:
         "br" bottom-right, "tr" top-right, "tl" top-left, "bl" bottom-left.
       </description>
+      <choices>
+        <choice value="br" />
+        <choice value="tr" />
+        <choice value="tl" />
+        <choice value="bl" />
+      </choices>
     </key>
-
     <key name="normal-prompt-offset-x" type="i">
       <default>12</default>
       <summary>Cursor Offset X</summary>
@@ -131,7 +121,6 @@
         Horizontal offset (pixels) from the cursor when following it.
       </description>
     </key>
-
     <key name="normal-prompt-offset-y" type="i">
       <default>12</default>
       <summary>Cursor Offset Y</summary>
@@ -139,7 +128,6 @@
         Vertical offset (pixels) from the cursor when following it.
       </description>
     </key>
-
     <key name="normal-prompt-monitor" type="s">
       <default>''</default>
       <summary>Prompt Monitor</summary>
@@ -149,7 +137,6 @@
         Value is the monitor index (e.g. "0", "1").
       </description>
     </key>
-
     <key name="normal-prompt-fixed-x" type="i">
       <default>-1</default>
       <summary>Fixed X</summary>
@@ -158,7 +145,6 @@
         Use -1 to center horizontally.
       </description>
     </key>
-
     <key name="normal-prompt-fixed-y" type="i">
       <default>-1</default>
       <summary>Fixed Y</summary>
@@ -167,7 +153,6 @@
         Use -1 to center vertically.
       </description>
     </key>
-
     <key name="normal-prompt-css" type="s">
       <default>''</default>
       <summary>Normal Prompt CSS</summary>
@@ -175,7 +160,6 @@
         Optional inline CSS applied to the password prompt container when one is shown.
       </description>
     </key>
-
     <key name="normal-prompt-css-saved-entries" type="s">
       <default>'[]'</default>
       <summary>Normal Prompt CSS Saved Entries</summary>
@@ -184,7 +168,6 @@
         Each entry stores a name and code snippet.
       </description>
     </key>
-
     <key name="normal-background-css" type="s">
       <default>''</default>
       <summary>Normal Background CSS</summary>
@@ -192,7 +175,6 @@
         Optional inline CSS applied to the full-screen background actor while locked.
       </description>
     </key>
-
     <key name="normal-background-css-saved-entries" type="s">
       <default>'[]'</default>
       <summary>Normal Background CSS Saved Entries</summary>
@@ -201,50 +183,33 @@
         Each entry stores a name and code snippet.
       </description>
     </key>
-
     <key name="normal-prompt-custom-js" type="s">
       <default>''</default>
       <summary>Normal Prompt Custom JS</summary>
-      <description>
-        Optional JavaScript snippet executed for the lock UI while locked.
-        Receives a context object; use with care.
-      </description>
+      <description>Retired setting. Existing JavaScript is retained for export but is never executed.</description>
     </key>
-
     <key name="normal-prompt-custom-js-saved-entries" type="s">
       <default>'[]'</default>
       <summary>Normal Prompt Custom JS Saved Entries</summary>
-      <description>
-        JSON array of saved Custom JS entries for the Normal password prompt editor.
-        Each entry stores a name and code snippet.
-      </description>
+      <description>Retired saved JavaScript library. Existing entries are retained for export but are never executed.</description>
     </key>
-
     <key name="debug-show-info" type="b">
       <default>true</default>
       <summary>Show Debug Info</summary>
-      <description>
-        When Debug Mode is enabled, controls whether the on-screen debug overlay is shown.
-      </description>
+      <description>Show session and authentication status when diagnostics are enabled. Passwords and typed characters are never displayed or logged.</description>
     </key>
-
     <key name="debug-abort-use-lock-hotkey" type="b">
       <default>false</default>
       <summary>Use Lock Hotkey for Abort</summary>
-      <description>
-        When enabled, the Debug Abort Hotkey is forced to match the Lock Hotkey.
-        When disabled, you can set a separate Debug Abort Hotkey.
-      </description>
+      <description>Use the activation shortcut as the emergency GNOME lock shortcut while the privacy screen is active.</description>
     </key>
-
     <key name="debug-abort-hotkey-custom" type="as">
-      <default><![CDATA[['<Control><Alt><Shift>u']]]></default>
+      <default>['&lt;Control&gt;&lt;Alt&gt;&lt;Shift&gt;u']</default>
       <summary>Debug Abort Hotkey (Custom)</summary>
       <description>
         Stores the user-defined Debug Abort Hotkey when "Use Lock Hotkey for Abort" is enabled.
         When the option is disabled, this value is restored back to Debug Abort Hotkey.
       </description>
     </key>
-    
   </schema>
 </schemalist>

@@ -1,9 +1,11 @@
 {
     "name": "Stealth Lock",
-    "description": "Invisible screen freeze with custom hotkey. Freezes display, pauses media, shows lock cursor. Unlock by typing password and pressing Enter.",
+    "description": "Password-protected privacy screen over your desktop, with in-memory display freezing, media pause and configurable cursor. Use GNOME's native lock for session security.",
     "uuid": "stealth-lock@user",
     "shell-version": ["45", "46", "47", "48"],
-    "version": 8,
-    "url": "",
+    "session-modes": ["user", "unlock-dialog"],
+    "version": 9,
+    "version-name": "1.0",
+    "url": "https://github.com/RisPNG/stealth-lock",
     "settings-schema": "org.gnome.shell.extensions.stealth-lock"
 }

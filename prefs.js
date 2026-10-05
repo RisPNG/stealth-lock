@@ -1,1673 +1,422 @@
-/**
- * Stealth Lock - Preferences UI
- * 
- * Allows users to configure their custom lock hotkey
- */
-
 import Adw from 'gi://Adw';
-import Gtk from 'gi://Gtk';
 import Gdk from 'gi://Gdk';
 import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
+import Gtk from 'gi://Gtk';
 
-import { ExtensionPreferences, gettext as _ } from 'resource:///org/gnome/Shell/Extensions/js/extensions/prefs.js';
+import {ExtensionPreferences, gettext as _} from 'resource:///org/gnome/Shell/Extensions/js/extensions/prefs.js';
 
 export default class StealthLockPreferences extends ExtensionPreferences {
     fillPreferencesWindow(window) {
         const settings = this.getSettings();
-        
-        // Create a preferences page
-        const page = new Adw.PreferencesPage({
-            title: _('General'),
-            icon_name: 'dialog-password-symbolic',
-        });
+        this._dialogs = new Set();
+        this._cancellable = new Gio.Cancellable();
+        window.set_default_size(760, 780);
+
+        const page = new Adw.PreferencesPage({title: _('General'), icon_name: 'dialog-password-symbolic'});
         window.add(page);
-        
-        // Create a preferences group for hotkey
-        const hotkeyGroup = new Adw.PreferencesGroup({
-            title: _('Keyboard Shortcut'),
-            description: _('Configure the hotkey to activate stealth lock'),
-        });
-        page.add(hotkeyGroup);
-        
-        // Hotkey row
-        const hotkeyRow = new Adw.ActionRow({
-            title: _('Lock Hotkey'),
-            subtitle: _('Press to set a new keyboard shortcut'),
-        });
-        
-        // Get current hotkey
-        const currentHotkey = settings.get_strv('lock-hotkey')[0] || '<Super><Control>l';
-        
-        // Shortcut label
-        const shortcutLabel = new Gtk.ShortcutLabel({
-            accelerator: currentHotkey,
-            valign: Gtk.Align.CENTER,
-        });
-        hotkeyRow.add_suffix(shortcutLabel);
-        
-        // Edit button
-        const editButton = new Gtk.Button({
-            icon_name: 'edit-symbolic',
-            valign: Gtk.Align.CENTER,
-            css_classes: ['flat'],
-        });
-        hotkeyRow.add_suffix(editButton);
-        
-        // Clear button
-        const clearButton = new Gtk.Button({
-            icon_name: 'edit-clear-symbolic',
-            valign: Gtk.Align.CENTER,
-            css_classes: ['flat'],
-            tooltip_text: _('Reset to default'),
-        });
-        hotkeyRow.add_suffix(clearButton);
-        
-        hotkeyGroup.add(hotkeyRow);
-        
-        // Hotkey capture dialog
-        editButton.connect('clicked', () => {
-            this._showHotkeyDialog(window, settings, 'lock-hotkey', shortcutLabel);
-        });
-        
-        // Reset to default
-        clearButton.connect('clicked', () => {
-            const defaultHotkey = '<Super><Control>l';
-            settings.set_strv('lock-hotkey', [defaultHotkey]);
-            shortcutLabel.accelerator = defaultHotkey;
-        });
-        
-        // Listen for settings changes
-        settings.connect('changed::lock-hotkey', () => {
-            const hotkey = settings.get_strv('lock-hotkey')[0] || '<Super><Control>l';
-            shortcutLabel.accelerator = hotkey;
-        });
+        const shortcuts = new Adw.PreferencesGroup({title: _('Keyboard Shortcut')});
+        const features = new Adw.PreferencesGroup({title: _('Features')});
+        const password = new Adw.PreferencesGroup({title: _('Password Prompt')});
+        const cursor = new Adw.PreferencesGroup({title: _('Cursor'), sensitive: settings.get_string('cursor-mode') === 'lock-icon'});
+        const styles = new Adw.PreferencesGroup({title: _('Appearance')});
+        const debug = new Adw.PreferencesGroup({title: _('Debug'), description: _('Troubleshooting and handoff to the GNOME lock screen')});
+        const notes = new Adw.PreferencesGroup({title: _('Important Notes')});
+        for (const group of [shortcuts, features, password, cursor, styles, debug, notes])
+            page.add(group);
 
-        const DEFAULT_LOCK_HOTKEY = '<Super><Control>l';
-        const DEFAULT_ABORT_HOTKEY = '<Control><Alt><Shift>u';
-        const CURSOR_MODE_VALUES = ['lock-icon', 'normal', 'hidden'];
-        const CURSOR_MODE_LABELS = [_('Lock Icon'), _('Normal Cursor'), _('No Cursor')];
-
-        const getHotkey = (key, fallback) => {
-            try {
-                return settings.get_strv(key)[0] || fallback;
-            } catch (e) {
-                return fallback;
-            }
-        };
-
-        const setHotkey = (key, accel) => {
-            settings.set_strv(key, [accel]);
-        };
-
-        const normalizeCursorMode = (mode) => {
-            if (CURSOR_MODE_VALUES.includes(mode))
-                return mode;
-            if (mode === 'none' || mode === 'no-cursor')
-                return 'hidden';
-            return 'lock-icon';
-        };
-
-        const getLegacyLockCursor = () => {
-            try {
-                return settings.get_boolean('lock-cursor');
-            } catch (e) {
-                return true;
-            }
-        };
-
-        const getCursorMode = () => {
-            try {
-                const mode = settings.get_string('cursor-mode')?.trim() ?? '';
-                if (CURSOR_MODE_VALUES.includes(mode))
-                    return mode;
-            } catch (e) {
-                // Fall through to legacy key
-            }
-
-            return getLegacyLockCursor() ? 'lock-icon' : 'normal';
-        };
-
-        const setCursorMode = (mode) => {
-            const normalized = normalizeCursorMode(mode);
-
-            try {
-                settings.set_string('cursor-mode', normalized);
-            } catch (e) {
-                // Ignore when running against older schema
-            }
-
-            // Keep legacy key in sync for downgrade compatibility.
-            try {
-                settings.set_boolean('lock-cursor', normalized === 'lock-icon');
-            } catch (e) {
-                // Ignore when legacy key is unavailable
-            }
-        };
-
-        const migrateLegacyCursorMode = () => {
-            // One-time migration: if cursor-mode has no user value yet but the
-            // old lock-cursor key does, map it to the new enum.
-            try {
-                const hasCursorModeUserValue = settings.get_user_value('cursor-mode') !== null;
-                if (hasCursorModeUserValue)
-                    return;
-
-                const hasLegacyUserValue = settings.get_user_value('lock-cursor') !== null;
-                if (!hasLegacyUserValue)
-                    return;
-
-                setCursorMode(getLegacyLockCursor() ? 'lock-icon' : 'normal');
-            } catch (e) {
-                // Ignore when user-value APIs/keys are unavailable
-            }
-        };
-
-        migrateLegacyCursorMode();
-
-        const clampByte = (value, fallback) => {
-            const n = Number(value);
-            if (!Number.isFinite(n))
-                return fallback;
-            return Math.max(0, Math.min(255, Math.round(n)));
-        };
-
-        const getRgbaBytes = (key, fallbackBytes) => {
-            try {
-                const unpacked = settings.get_value(key).deep_unpack();
-                if (!Array.isArray(unpacked) || unpacked.length !== 4)
-                    return fallbackBytes;
-                return unpacked.map((v, i) => clampByte(v, fallbackBytes[i]));
-            } catch (e) {
-                return fallbackBytes;
-            }
-        };
-
-        const bytesToRgba = (bytes) => {
-            const rgba = new Gdk.RGBA();
-            rgba.red = (bytes[0] ?? 0) / 255;
-            rgba.green = (bytes[1] ?? 0) / 255;
-            rgba.blue = (bytes[2] ?? 0) / 255;
-            rgba.alpha = (bytes[3] ?? 255) / 255;
-            return rgba;
-        };
-
-        const rgbaToBytes = (rgba) => ([
-            clampByte((rgba?.red ?? 0) * 255, 0),
-            clampByte((rgba?.green ?? 0) * 255, 0),
-            clampByte((rgba?.blue ?? 0) * 255, 0),
-            clampByte((rgba?.alpha ?? 1) * 255, 255),
-        ]);
-
-        const setRgbaBytes = (key, bytes) => {
-            settings.set_value(key, new GLib.Variant('au', bytes));
-        };
-
-        // Features group
-        const featuresGroup = new Adw.PreferencesGroup({
-            title: _('Features'),
-            description: _('Toggle optional behavior while locked'),
-        });
-        page.add(featuresGroup);
-
-        const freezeDisplayRow = new Adw.SwitchRow({
-            title: _('Freeze Display'),
-            subtitle: _('Capture screenshots and show them as a frozen overlay'),
-            active: settings.get_boolean('freeze-display'),
-        });
-        featuresGroup.add(freezeDisplayRow);
-
-        freezeDisplayRow.connect('notify::active', () => {
-            settings.set_boolean('freeze-display', freezeDisplayRow.active);
-        });
-        settings.connect('changed::freeze-display', () => {
-            freezeDisplayRow.active = settings.get_boolean('freeze-display');
-        });
-
-        const pauseMediaRow = new Adw.SwitchRow({
-            title: _('Pause Media'),
-            subtitle: _('Pause MPRIS media players on lock and resume on unlock'),
-            active: settings.get_boolean('pause-media'),
-        });
-        featuresGroup.add(pauseMediaRow);
-
-        pauseMediaRow.connect('notify::active', () => {
-            settings.set_boolean('pause-media', pauseMediaRow.active);
-        });
-        settings.connect('changed::pause-media', () => {
-            pauseMediaRow.active = settings.get_boolean('pause-media');
-        });
-
-        const cursorModeModel = Gtk.StringList.new(CURSOR_MODE_LABELS);
-        const cursorModeRow = new Adw.ComboRow({
-            title: _('Cursor'),
-            subtitle: _('Choose lock icon, normal cursor, or no cursor while locked'),
-            model: cursorModeModel,
-        });
-        featuresGroup.add(cursorModeRow);
-
-        const syncCursorModeSelected = () => {
-            const mode = getCursorMode();
-            const idx = Math.max(0, CURSOR_MODE_VALUES.indexOf(mode));
-            cursorModeRow.selected = idx;
-        };
-        syncCursorModeSelected();
-
-        cursorModeRow.connect('notify::selected', () => {
-            const mode = CURSOR_MODE_VALUES[cursorModeRow.selected] ?? 'lock-icon';
-            setCursorMode(mode);
-        });
-        settings.connect('changed::cursor-mode', syncCursorModeSelected);
-        settings.connect('changed::lock-cursor', syncCursorModeSelected);
-
-        const autoResetRow = new Adw.SpinRow({
-            title: _('Auto Reset (seconds)'),
-            subtitle: _('Seconds of inactivity before the password clears (0 = never)'),
-            adjustment: new Gtk.Adjustment({
-                lower: 0,
-                upper: 3600,
-                step_increment: 1,
-                page_increment: 10,
-            }),
-            value: settings.get_uint('auto-reset-seconds'),
-        });
-        featuresGroup.add(autoResetRow);
-
-        autoResetRow.connect('notify::value', () => {
-            const value = Math.max(0, Math.round(autoResetRow.value));
-            settings.set_uint('auto-reset-seconds', value);
-        });
-        settings.connect('changed::auto-reset-seconds', () => {
-            autoResetRow.value = settings.get_uint('auto-reset-seconds');
-        });
-
-        // Password prompt / lock type
-        const passwordGroup = new Adw.PreferencesGroup({
-            title: _('Password Prompt'),
-            description: _('Control how password entry is shown while locked'),
-        });
-        page.add(passwordGroup);
-
-        const lockTypeModel = Gtk.StringList.new([_('Stealth'), _('Normal')]);
-        const lockTypeRow = new Adw.ComboRow({
-            title: _('Lock Type'),
-            subtitle: _('Stealth hides the prompt; Normal shows an on-screen prompt'),
-            model: lockTypeModel,
-            selected: settings.get_string('lock-type') === 'normal' ? 1 : 0,
-        });
-        passwordGroup.add(lockTypeRow);
-
-        const followCursorRow = new Adw.SwitchRow({
-            title: _('Follow Cursor'),
-            subtitle: _('Position the prompt relative to the cursor'),
-            active: settings.get_boolean('normal-prompt-follow-cursor'),
-        });
-        passwordGroup.add(followCursorRow);
-
-        const anchorModel = Gtk.StringList.new([
-            _('Bottom Right'),
-            _('Top Right'),
-            _('Top Left'),
-            _('Bottom Left'),
-        ]);
-        const anchorValues = ['br', 'tr', 'tl', 'bl'];
-        const anchorRow = new Adw.ComboRow({
-            title: _('Cursor Anchor'),
-            subtitle: _('Where to place the prompt relative to the cursor'),
-            model: anchorModel,
-        });
-        passwordGroup.add(anchorRow);
-
-        const offsetXRow = new Adw.SpinRow({
-            title: _('Cursor Offset X'),
-            subtitle: _('Horizontal offset from the cursor (px)'),
-            adjustment: new Gtk.Adjustment({
-                lower: -500,
-                upper: 500,
-                step_increment: 1,
-                page_increment: 10,
-            }),
-            value: settings.get_int('normal-prompt-offset-x'),
-        });
-        passwordGroup.add(offsetXRow);
-
-        const offsetYRow = new Adw.SpinRow({
-            title: _('Cursor Offset Y'),
-            subtitle: _('Vertical offset from the cursor (px)'),
-            adjustment: new Gtk.Adjustment({
-                lower: -500,
-                upper: 500,
-                step_increment: 1,
-                page_increment: 10,
-            }),
-            value: settings.get_int('normal-prompt-offset-y'),
-        });
-        passwordGroup.add(offsetYRow);
-
-        // Monitor selection (populated dynamically from connected monitors)
-        const monitorLabels = [_('All Monitors')];
-        const monitorValues = [''];
-        try {
-            const display = Gdk.Display.get_default();
-            if (display) {
-                const monitorList = display.get_monitors();
-                const n = monitorList.get_n_items();
-                for (let i = 0; i < n; i++) {
-                    const mon = monitorList.get_item(i);
-                    const connector = mon.get_connector?.() ?? '';
-                    const model = mon.get_model?.() ?? '';
-                    const parts = [String(i)];
-                    if (connector) parts.push(connector);
-                    if (model) parts.push(`(${model})`);
-                    monitorLabels.push(parts.join(': '));
-                    monitorValues.push(String(i));
-                }
-            }
-        } catch (e) {
-            // Ignore - "All Monitors" will be the only option
+        const shortcutLabels = new Map();
+        let abortRow;
+        for (const [key, group, title, subtitle] of [
+            ['lock-hotkey', shortcuts, _('Activation Hotkey'), _('Activate the privacy screen')],
+            ['debug-abort-hotkey', debug, _('Abort Hotkey (Debug)'), _('Hand off to the GNOME lock screen; a password is still required')],
+        ]) {
+            const row = new Adw.ActionRow({title, subtitle});
+            const label = new Gtk.ShortcutLabel({accelerator: settings.get_strv(key)[0] ?? '', valign: Gtk.Align.CENTER});
+            const edit = new Gtk.Button({icon_name: 'edit-symbolic', valign: Gtk.Align.CENTER, css_classes: ['flat'], tooltip_text: _('Set shortcut')});
+            const reset = new Gtk.Button({icon_name: 'edit-clear-symbolic', valign: Gtk.Align.CENTER, css_classes: ['flat'], tooltip_text: _('Reset to default')});
+            row.add_suffix(label);
+            row.add_suffix(edit);
+            row.add_suffix(reset);
+            row.activatable_widget = edit;
+            group.add(row);
+            shortcutLabels.set(key, label);
+            edit.connect('clicked', () => this._showShortcutEditor(window, settings, key));
+            reset.connect('clicked', () => settings.reset(key));
+            if (key === 'debug-abort-hotkey')
+                abortRow = row;
         }
 
-        const monitorModel = Gtk.StringList.new(monitorLabels);
-        const monitorRow = new Adw.ComboRow({
-            title: _('Monitor'),
-            subtitle: _('Which monitor to center the prompt on'),
-            model: monitorModel,
+        for (const [key, title, subtitle] of [
+            ['freeze-display', _('Freeze Display'), _('Keep an in-memory snapshot of all monitors while active')],
+            ['pause-media', _('Pause Media'), _('Pause playing MPRIS media and resume those players after unlock')],
+        ]) {
+            const row = new Adw.SwitchRow({title, subtitle});
+            settings.bind(key, row, 'active', Gio.SettingsBindFlags.DEFAULT);
+            features.add(row);
+        }
+        const autoReset = new Adw.SpinRow({
+            title: _('Auto Reset (seconds)'),
+            subtitle: _('Clear the password after inactivity; 0 disables the timer'),
+            adjustment: new Gtk.Adjustment({lower: 0, upper: 3600, step_increment: 1, page_increment: 10}),
         });
-        passwordGroup.add(monitorRow);
+        settings.bind('auto-reset-seconds', autoReset, 'value', Gio.SettingsBindFlags.DEFAULT);
+        features.add(autoReset);
 
-        const syncMonitorSelected = () => {
-            const current = settings.get_string('normal-prompt-monitor') || '';
-            const idx = Math.max(0, monitorValues.indexOf(current));
-            monitorRow.selected = idx;
-        };
-        syncMonitorSelected();
+        const comboRows = new Map();
+        for (const [key, group, title, subtitle, values, labels] of [
+            ['cursor-mode', features, _('Cursor'), _('Choose how the pointer appears while active'), ['lock-icon', 'normal', 'hidden'], [_('Lock Icon'), _('Normal Cursor'), _('No Cursor')]],
+            ['lock-type', password, _('Lock Type'), _('Stealth hides the prompt; Normal shows a password entry'), ['stealth', 'normal'], [_('Stealth'), _('Normal')]],
+            ['normal-prompt-cursor-anchor', password, _('Cursor Anchor'), _('Place the prompt at this corner of the pointer'), ['br', 'tr', 'tl', 'bl'], [_('Bottom Right'), _('Top Right'), _('Top Left'), _('Bottom Left')]],
+        ]) {
+            const row = new Adw.ComboRow({title, subtitle, model: Gtk.StringList.new(labels), selected: Math.max(0, values.indexOf(settings.get_string(key)))});
+            row.connect('notify::selected', () => {
+                settings.set_string(key, values[row.selected]);
+                if (key === 'cursor-mode')
+                    settings.set_boolean('lock-cursor', row.selected === 0);
+            });
+            comboRows.set(key, {row, values});
+            group.add(row);
+        }
+        const follow = new Adw.SwitchRow({title: _('Follow Cursor'), subtitle: _('Position the normal prompt relative to the pointer')});
+        settings.bind('normal-prompt-follow-cursor', follow, 'active', Gio.SettingsBindFlags.DEFAULT);
+        password.add(follow);
 
-        monitorRow.connect('notify::selected', () => {
-            const value = monitorValues[monitorRow.selected] ?? '';
-            settings.set_string('normal-prompt-monitor', value);
-        });
-        settings.connect('changed::normal-prompt-monitor', syncMonitorSelected);
+        const positionRows = new Map();
+        for (const [key, title, subtitle, lower, upper, step] of [
+            ['normal-prompt-offset-x', _('Cursor Offset X'), _('Horizontal distance from the pointer in pixels'), -500, 500, 10],
+            ['normal-prompt-offset-y', _('Cursor Offset Y'), _('Vertical distance from the pointer in pixels'), -500, 500, 10],
+            ['normal-prompt-fixed-x', _('Fixed X'), _('Horizontal position in pixels; -1 centers the prompt'), -1, 10000, 50],
+            ['normal-prompt-fixed-y', _('Fixed Y'), _('Vertical position in pixels; -1 centers the prompt'), -1, 10000, 50],
+        ]) {
+            const row = new Adw.SpinRow({title, subtitle, adjustment: new Gtk.Adjustment({lower, upper, step_increment: 1, page_increment: step})});
+            settings.bind(key, row, 'value', Gio.SettingsBindFlags.DEFAULT);
+            positionRows.set(key, row);
+            password.add(row);
+        }
+        const monitorValues = [''];
+        const monitorLabels = [_('All Monitors')];
+        const monitors = Gdk.Display.get_default().get_monitors();
+        for (let index = 0; index < monitors.get_n_items(); index++) {
+            const monitor = monitors.get_item(index);
+            const label = [String(index), monitor.get_connector(), monitor.get_model()].filter(Boolean).join(': ');
+            monitorValues.push(String(index));
+            monitorLabels.push(label);
+        }
+        const selectedMonitor = settings.get_string('normal-prompt-monitor');
+        if (!monitorValues.includes(selectedMonitor)) {
+            monitorValues.push(selectedMonitor);
+            monitorLabels.push(_('Monitor %s (disconnected)').format(selectedMonitor));
+        }
+        const monitorRow = new Adw.ComboRow({title: _('Monitor'), subtitle: _('Center the fixed prompt on this monitor'), model: Gtk.StringList.new(monitorLabels), selected: monitorValues.indexOf(selectedMonitor)});
+        monitorRow.connect('notify::selected', () => settings.set_string('normal-prompt-monitor', monitorValues[monitorRow.selected]));
+        password.add(monitorRow);
+        comboRows.set('normal-prompt-monitor', {row: monitorRow, values: monitorValues});
 
-        const fixedXRow = new Adw.SpinRow({
-            title: _('Fixed X'),
-            subtitle: _('Prompt X position (px). Use -1 to center'),
-            adjustment: new Gtk.Adjustment({
-                lower: -1,
-                upper: 10000,
-                step_increment: 1,
-                page_increment: 50,
-            }),
-            value: settings.get_int('normal-prompt-fixed-x'),
-        });
-        passwordGroup.add(fixedXRow);
-
-        const fixedYRow = new Adw.SpinRow({
-            title: _('Fixed Y'),
-            subtitle: _('Prompt Y position (px). Use -1 to center'),
-            adjustment: new Gtk.Adjustment({
-                lower: -1,
-                upper: 10000,
-                step_increment: 1,
-                page_increment: 50,
-            }),
-            value: settings.get_int('normal-prompt-fixed-y'),
-        });
-        passwordGroup.add(fixedYRow);
-
-        const customCssRow = new Adw.ActionRow({
-            title: _('Prompt CSS'),
-            subtitle: _('Override prompt container styling when a prompt is shown'),
-        });
-        const editCssButton = new Gtk.Button({
-            icon_name: 'document-edit-symbolic',
-            valign: Gtk.Align.CENTER,
-            css_classes: ['flat'],
-        });
-        customCssRow.add_suffix(editCssButton);
-        const savedCssButton = new Gtk.Button({
-            icon_name: 'view-list-symbolic',
-            valign: Gtk.Align.CENTER,
-            css_classes: ['flat'],
-            tooltip_text: _('Saved entries'),
-        });
-        customCssRow.add_suffix(savedCssButton);
-        customCssRow.activatable_widget = editCssButton;
-        featuresGroup.add(customCssRow);
-
-        const backgroundCssRow = new Adw.ActionRow({
-            title: _('Background CSS'),
-            subtitle: _('Override the full-screen background actor styling (inline CSS)'),
-        });
-        const editBackgroundCssButton = new Gtk.Button({
-            icon_name: 'document-edit-symbolic',
-            valign: Gtk.Align.CENTER,
-            css_classes: ['flat'],
-        });
-        backgroundCssRow.add_suffix(editBackgroundCssButton);
-        const savedBackgroundCssButton = new Gtk.Button({
-            icon_name: 'view-list-symbolic',
-            valign: Gtk.Align.CENTER,
-            css_classes: ['flat'],
-            tooltip_text: _('Saved entries'),
-        });
-        backgroundCssRow.add_suffix(savedBackgroundCssButton);
-        backgroundCssRow.activatable_widget = editBackgroundCssButton;
-        featuresGroup.add(backgroundCssRow);
-
-        const customJsRow = new Adw.ActionRow({
-            title: _('Custom JS'),
-            subtitle: _('Run custom JS to modify the prompt, background, or overlay (advanced, use with care)'),
-        });
-        const editJsButton = new Gtk.Button({
-            icon_name: 'document-edit-symbolic',
-            valign: Gtk.Align.CENTER,
-            css_classes: ['flat'],
-        });
-        customJsRow.add_suffix(editJsButton);
-        const savedJsButton = new Gtk.Button({
-            icon_name: 'view-list-symbolic',
-            valign: Gtk.Align.CENTER,
-            css_classes: ['flat'],
-            tooltip_text: _('Saved entries'),
-        });
-        customJsRow.add_suffix(savedJsButton);
-        customJsRow.activatable_widget = editJsButton;
-        featuresGroup.add(customJsRow);
-
-        const syncPasswordUi = () => {
-            const isNormal = settings.get_string('lock-type') === 'normal';
-            const follow = settings.get_boolean('normal-prompt-follow-cursor');
-
-            followCursorRow.sensitive = isNormal;
-
-            anchorRow.sensitive = isNormal && follow;
-            offsetXRow.sensitive = isNormal && follow;
-            offsetYRow.sensitive = isNormal && follow;
-
-            monitorRow.sensitive = isNormal && !follow;
-            fixedXRow.sensitive = isNormal && !follow;
-            fixedYRow.sensitive = isNormal && !follow;
-
-        };
-
-        const syncAnchorSelected = () => {
-            const current = settings.get_string('normal-prompt-cursor-anchor') || 'br';
-            const idx = Math.max(0, anchorValues.indexOf(current));
-            anchorRow.selected = idx;
-        };
-        syncAnchorSelected();
-
-        lockTypeRow.connect('notify::selected', () => {
-            settings.set_string('lock-type', lockTypeRow.selected === 1 ? 'normal' : 'stealth');
-            syncPasswordUi();
-        });
-        settings.connect('changed::lock-type', () => {
-            lockTypeRow.selected = settings.get_string('lock-type') === 'normal' ? 1 : 0;
-            syncPasswordUi();
-        });
-
-        followCursorRow.connect('notify::active', () => {
-            settings.set_boolean('normal-prompt-follow-cursor', followCursorRow.active);
-            syncPasswordUi();
-        });
-        settings.connect('changed::normal-prompt-follow-cursor', () => {
-            followCursorRow.active = settings.get_boolean('normal-prompt-follow-cursor');
-            syncPasswordUi();
-        });
-
-        anchorRow.connect('notify::selected', () => {
-            const value = anchorValues[anchorRow.selected] ?? 'br';
-            settings.set_string('normal-prompt-cursor-anchor', value);
-        });
-        settings.connect('changed::normal-prompt-cursor-anchor', () => {
-            syncAnchorSelected();
-        });
-
-        offsetXRow.connect('notify::value', () => {
-            settings.set_int('normal-prompt-offset-x', Math.round(offsetXRow.value));
-        });
-        settings.connect('changed::normal-prompt-offset-x', () => {
-            offsetXRow.value = settings.get_int('normal-prompt-offset-x');
-        });
-
-        offsetYRow.connect('notify::value', () => {
-            settings.set_int('normal-prompt-offset-y', Math.round(offsetYRow.value));
-        });
-        settings.connect('changed::normal-prompt-offset-y', () => {
-            offsetYRow.value = settings.get_int('normal-prompt-offset-y');
-        });
-
-        fixedXRow.connect('notify::value', () => {
-            settings.set_int('normal-prompt-fixed-x', Math.round(fixedXRow.value));
-        });
-        settings.connect('changed::normal-prompt-fixed-x', () => {
-            fixedXRow.value = settings.get_int('normal-prompt-fixed-x');
-        });
-
-        fixedYRow.connect('notify::value', () => {
-            settings.set_int('normal-prompt-fixed-y', Math.round(fixedYRow.value));
-        });
-        settings.connect('changed::normal-prompt-fixed-y', () => {
-            fixedYRow.value = settings.get_int('normal-prompt-fixed-y');
-        });
-
-        editCssButton.connect('clicked', () => {
-            this._showTextEditDialog(
-                window,
-                settings,
-                'normal-prompt-css',
-                _('Prompt CSS'),
-                _('Inline CSS applied to the password prompt container when it is shown.'),
-                {
-                    entriesKey: 'normal-prompt-css-saved-entries',
-                }
-            );
-        });
-
-        editBackgroundCssButton.connect('clicked', () => {
-            this._showTextEditDialog(
-                window,
-                settings,
-                'normal-background-css',
-                _('Background CSS'),
-                _('Inline CSS applied to the full-screen background actor.'),
-                {
-                    entriesKey: 'normal-background-css-saved-entries',
-                }
-            );
-        });
-
-        editJsButton.connect('clicked', () => {
-            this._showTextEditDialog(
-                window,
-                settings,
-                'normal-prompt-custom-js',
-                _('Custom JS'),
-                _('Advanced: runs inside GNOME Shell. The code receives a single object `ctx` with fields like `ctx.event`, `ctx.prompt`, `ctx.background`, `ctx.backgroundLayer`, `ctx.backgrounds`, `ctx.overlay`, `ctx.state`, and `ctx.effects.ensureBlur(...)`.'),
-                {
-                    entriesKey: 'normal-prompt-custom-js-saved-entries',
-                }
-            );
-        });
-
-        savedCssButton.connect('clicked', () => {
-            this._showSavedTextEntriesDialog(
-                window,
-                settings,
-                'normal-prompt-css',
-                'normal-prompt-css-saved-entries',
-                _('Prompt CSS'),
-                _('Click an entry to load it into the current Prompt CSS value.')
-            );
-        });
-
-        savedBackgroundCssButton.connect('clicked', () => {
-            this._showSavedTextEntriesDialog(
-                window,
-                settings,
-                'normal-background-css',
-                'normal-background-css-saved-entries',
-                _('Background CSS'),
-                _('Click an entry to load it into the current Background CSS value.')
-            );
-        });
-
-        savedJsButton.connect('clicked', () => {
-            this._showSavedTextEntriesDialog(
-                window,
-                settings,
-                'normal-prompt-custom-js',
-                'normal-prompt-custom-js-saved-entries',
-                _('Custom JS'),
-                _('Click an entry to load it into the current Custom JS value.')
-            );
-        });
-
-        syncPasswordUi();
-
-        // Cursor group
-        const cursorGroup = new Adw.PreferencesGroup({
-            title: _('Cursor'),
-            description: _('Customize the lock cursor appearance'),
-            sensitive: getCursorMode() === 'lock-icon',
-        });
-        page.add(cursorGroup);
-
-        const syncCursorGroupSensitivity = () => {
-            cursorGroup.sensitive = getCursorMode() === 'lock-icon';
-        };
-        settings.connect('changed::cursor-mode', syncCursorGroupSensitivity);
-        settings.connect('changed::lock-cursor', syncCursorGroupSensitivity);
-
-        const cursorBitmapRow = new Adw.EntryRow({
-            title: _('Cursor Bitmap'),
-            text: settings.get_string('cursor-bitmap-path'),
-        });
-        cursorBitmapRow.set_tooltip_text(_('Optional image path (PNG/SVG). Leave blank to use the built-in cursor.'));
-        cursorGroup.add(cursorBitmapRow);
-
-        cursorBitmapRow.connect('notify::text', () => {
-            settings.set_string('cursor-bitmap-path', cursorBitmapRow.text.trim());
-        });
-        settings.connect('changed::cursor-bitmap-path', () => {
-            cursorBitmapRow.text = settings.get_string('cursor-bitmap-path');
-        });
-
-        const browseCursorBitmapButton = new Gtk.Button({
-            icon_name: 'folder-open-symbolic',
-            valign: Gtk.Align.CENTER,
-            css_classes: ['flat'],
-            tooltip_text: _('Browse...'),
-        });
-        cursorBitmapRow.add_suffix(browseCursorBitmapButton);
-
-        const clearCursorBitmapButton = new Gtk.Button({
-            icon_name: 'edit-clear-symbolic',
-            valign: Gtk.Align.CENTER,
-            css_classes: ['flat'],
-            tooltip_text: _('Clear'),
-        });
-        cursorBitmapRow.add_suffix(clearCursorBitmapButton);
-
-        browseCursorBitmapButton.connect('clicked', () => {
-            try {
-                console.log('Stealth Lock prefs: Browse cursor image');
-
-                if (this._cursorBitmapDialogCancellable) {
-                    try {
-                        this._cursorBitmapDialogCancellable.cancel();
-                    } catch (e) {
-                        // Ignore
+        const bitmap = new Adw.EntryRow({title: _('Cursor Bitmap'), tooltip_text: _('Optional image path or URI; leave blank to use the built-in cursor')});
+        settings.bind('cursor-bitmap-path', bitmap, 'text', Gio.SettingsBindFlags.DEFAULT);
+        const browse = new Gtk.Button({icon_name: 'folder-open-symbolic', valign: Gtk.Align.CENTER, css_classes: ['flat'], tooltip_text: _('Select image')});
+        const clearBitmap = new Gtk.Button({icon_name: 'edit-clear-symbolic', valign: Gtk.Align.CENTER, css_classes: ['flat'], tooltip_text: _('Use built-in cursor')});
+        bitmap.add_suffix(browse);
+        bitmap.add_suffix(clearBitmap);
+        cursor.add(bitmap);
+        clearBitmap.connect('clicked', () => settings.reset('cursor-bitmap-path'));
+        browse.connect('clicked', () => {
+            const images = new Gtk.FileFilter({name: _('Images')});
+            images.add_mime_type('image/*');
+            const files = new Gtk.FileFilter({name: _('All Files')});
+            files.add_pattern('*');
+            const filters = new Gio.ListStore({item_type: Gtk.FileFilter});
+            filters.append(images);
+            filters.append(files);
+            const dialog = new Gtk.FileDialog({title: _('Select Cursor Image'), filters, default_filter: images});
+            browse.sensitive = false;
+            dialog.open(window, this._cancellable, (source, result) => {
+                try {
+                    const file = source.open_finish(result);
+                    if (!this._cancellable.is_cancelled())
+                        settings.set_string('cursor-bitmap-path', file.get_path() ?? file.get_uri());
+                } catch (error) {
+                    if (!error.matches(Gtk.DialogError, Gtk.DialogError.DISMISSED) &&
+                        !error.matches(Gtk.DialogError, Gtk.DialogError.CANCELLED) &&
+                        !error.matches(Gio.IOErrorEnum, Gio.IOErrorEnum.CANCELLED)) {
+                        console.error('Stealth Lock: cursor image picker failed', error);
+                        if (!this._cancellable.is_cancelled())
+                            window.add_toast(new Adw.Toast({title: _('Could not open cursor image')}));
                     }
-                    this._cursorBitmapDialogCancellable = null;
+                } finally {
+                    if (!this._cancellable.is_cancelled())
+                        browse.sensitive = true;
                 }
+            });
+        });
 
-                const imageFilter = new Gtk.FileFilter();
-                imageFilter.set_name(_('Images'));
-                imageFilter.add_mime_type('image/png');
-                imageFilter.add_mime_type('image/svg+xml');
-                imageFilter.add_mime_type('image/*');
+        const colorButtons = new Map();
+        for (const [key, title, subtitle] of [
+            ['cursor-fg-rgba', _('Cursor Foreground'), _('Outline and details of the built-in cursor')],
+            ['cursor-bg-rgba', _('Cursor Background'), _('Fill of the built-in cursor')],
+        ]) {
+            const bytes = settings.get_value(key).deep_unpack();
+            const rgba = new Gdk.RGBA({red: bytes[0] / 255, green: bytes[1] / 255, blue: bytes[2] / 255, alpha: bytes[3] / 255});
+            const row = new Adw.ActionRow({title, subtitle});
+            const button = new Gtk.ColorDialogButton({dialog: new Gtk.ColorDialog({with_alpha: true}), rgba, valign: Gtk.Align.CENTER});
+            button.connect('notify::rgba', () => {
+                const value = button.rgba;
+                const components = [value.red, value.green, value.blue, value.alpha].map(component => Math.round(component * 255));
+                settings.set_value(key, new GLib.Variant('au', components));
+            });
+            row.add_suffix(button);
+            row.activatable_widget = button;
+            cursor.add(row);
+            colorButtons.set(key, button);
+        }
+        for (const [key, title, description] of [
+            ['normal-prompt-css', _('Prompt CSS'), _('Inline CSS for the normal password prompt container')],
+            ['normal-background-css', _('Background CSS'), _('Inline CSS for the full-screen background')],
+        ]) {
+            const row = new Adw.ActionRow({title, subtitle: description});
+            const edit = new Gtk.Button({icon_name: 'document-edit-symbolic', valign: Gtk.Align.CENTER, css_classes: ['flat'], tooltip_text: _('Edit CSS and saved styles')});
+            row.add_suffix(edit);
+            row.activatable_widget = edit;
+            styles.add(row);
+            edit.connect('clicked', () => this._showStyleEditor(window, settings, key, title, description));
+        }
+        styles.add(new Adw.ActionRow({
+            title: _('Legacy JavaScript'),
+            subtitle: _('Previous scripts and saved entries remain in GSettings for export. They are ignored and are never executed.'),
+        }));
 
-                const allFilter = new Gtk.FileFilter();
-                allFilter.set_name(_('All Files'));
-                allFilter.add_pattern('*');
+        const debugMode = new Adw.SwitchRow({title: _('Enable Debug Mode'), subtitle: _('Enable diagnostic logging and the abort shortcut')});
+        const debugInfo = new Adw.SwitchRow({title: _('Show Debug Info'), subtitle: _('Show diagnostic status while the privacy screen is active')});
+        const useActivation = new Adw.SwitchRow({title: _('Abort Hotkey = Activation Hotkey'), subtitle: _('Use the activation shortcut to hand off to the GNOME lock screen')});
+        for (const [key, row] of [
+            ['debug-mode', debugMode],
+            ['debug-show-info', debugInfo],
+            ['debug-abort-use-lock-hotkey', useActivation],
+        ]) {
+            settings.bind(key, row, 'active', Gio.SettingsBindFlags.DEFAULT);
+            debug.add(row);
+        }
+        notes.add(new Adw.ActionRow({
+            title: _('Privacy Screen'),
+            subtitle: _('This extension blocks normal desktop input while active. Disabling it or restarting GNOME Shell can remove the overlay. Use the GNOME lock screen for session security.'),
+        }));
+        notes.add(new Adw.ActionRow({
+            title: _('System Password'),
+            subtitle: _('Unlock uses your login password. Passwords are not saved in settings or written to disk. Ctrl+Alt+Shift+L hands off to the GNOME lock screen.'),
+        }));
 
-                // Prefer Gtk.FileDialog (GTK4) for portal-backed picking.
-                if (Gtk.FileDialog) {
-                    console.log('Stealth Lock prefs: Using Gtk.FileDialog');
-                    const dialog = new Gtk.FileDialog({
-                        title: _('Select Cursor Image'),
-                    });
-                    this._cursorBitmapDialog = dialog;
+        const isNormal = settings.get_string('lock-type') === 'normal';
+        const follows = settings.get_boolean('normal-prompt-follow-cursor');
+        follow.sensitive = isNormal;
+        comboRows.get('normal-prompt-cursor-anchor').row.sensitive = isNormal && follows;
+        monitorRow.sensitive = isNormal && !follows;
+        for (const [key, row] of positionRows)
+            row.sensitive = isNormal && (key.includes('offset') ? follows : !follows);
+        debugInfo.sensitive = debugMode.active;
+        useActivation.sensitive = debugMode.active;
+        abortRow.sensitive = debugMode.active && !useActivation.active;
+        shortcutLabels.get('debug-abort-hotkey').accelerator = settings.get_strv(useActivation.active ? 'lock-hotkey' : 'debug-abort-hotkey')[0] ?? '';
 
-                    const filters = new Gio.ListStore({ item_type: Gtk.FileFilter });
-                    filters.append(imageFilter);
-                    filters.append(allFilter);
-                    dialog.set_filters(filters);
-                    dialog.set_default_filter(imageFilter);
-
-                    const cancellable = new Gio.Cancellable();
-                    this._cursorBitmapDialogCancellable = cancellable;
-
-                    browseCursorBitmapButton.sensitive = false;
-                    dialog.open(window, cancellable, (source, result) => {
-                        try {
-                            const file = dialog.open_finish(result);
-                            if (!file)
-                                return;
-
-                            const path = file.get_path();
-                            if (path) {
-                                settings.set_string('cursor-bitmap-path', path);
-                            } else {
-                                settings.set_string('cursor-bitmap-path', file.get_uri());
-                            }
-                        } catch (e) {
-                            // Cancelled or failed - ignore, but log failures for troubleshooting.
-                            if (!e?.matches?.(Gio.IOErrorEnum, Gio.IOErrorEnum.CANCELLED))
-                                console.error('Stealth Lock prefs: Cursor image picker failed:', e);
-                        } finally {
-                            browseCursorBitmapButton.sensitive = true;
-                            if (this._cursorBitmapDialog === dialog)
-                                this._cursorBitmapDialog = null;
-                            if (this._cursorBitmapDialogCancellable === cancellable)
-                                this._cursorBitmapDialogCancellable = null;
-                        }
-                    });
-
-                    return;
+        let previousUseActivation = useActivation.active;
+        const settingsId = settings.connect('changed', (_settings, key) => {
+            if (key === 'debug-abort-use-lock-hotkey' && previousUseActivation !== useActivation.active) {
+                previousUseActivation = useActivation.active;
+                if (useActivation.active) {
+                    settings.set_strv('debug-abort-hotkey-custom', settings.get_strv('debug-abort-hotkey'));
+                    settings.set_strv('debug-abort-hotkey', settings.get_strv('lock-hotkey'));
+                } else {
+                    settings.set_strv('debug-abort-hotkey', settings.get_strv('debug-abort-hotkey-custom'));
                 }
-
-                // Fallback (older stacks): Gtk.FileChooserNative.
-                console.log('Stealth Lock prefs: Using Gtk.FileChooserNative');
-                const chooser = new Gtk.FileChooserNative({
-                    title: _('Select Cursor Image'),
-                    transient_for: window,
-                    modal: true,
-                    action: Gtk.FileChooserAction.OPEN,
-                    accept_label: _('Open'),
-                    cancel_label: _('Cancel'),
-                });
-                this._cursorBitmapChooser = chooser;
-
-                chooser.add_filter(imageFilter);
-                chooser.add_filter(allFilter);
-                chooser.set_filter(imageFilter);
-
-                chooser.connect('response', (dlg, response) => {
-                    try {
-                        if (response !== Gtk.ResponseType.ACCEPT)
-                            return;
-
-                        const file = dlg.get_file();
-                        if (!file)
-                            return;
-
-                        const path = file.get_path();
-                        if (path) {
-                            settings.set_string('cursor-bitmap-path', path);
-                        } else {
-                            settings.set_string('cursor-bitmap-path', file.get_uri());
-                        }
-                    } catch (e) {
-                        console.error('Stealth Lock prefs: Cursor image picker failed:', e);
-                    } finally {
-                        dlg.destroy();
-                        if (this._cursorBitmapChooser === dlg)
-                            this._cursorBitmapChooser = null;
-                    }
-                });
-
-                chooser.show();
-            } catch (e) {
-                console.error('Stealth Lock prefs: Failed to open cursor image picker:', e);
-                browseCursorBitmapButton.sensitive = true;
+            } else if (key === 'lock-hotkey' && useActivation.active) {
+                settings.set_strv('debug-abort-hotkey', settings.get_strv('lock-hotkey'));
+            } else if (key === 'debug-abort-hotkey' && !useActivation.active) {
+                settings.set_strv('debug-abort-hotkey-custom', settings.get_strv('debug-abort-hotkey'));
             }
-        });
-
-        clearCursorBitmapButton.connect('clicked', () => {
-            settings.set_string('cursor-bitmap-path', '');
-        });
-
-        const fgRow = new Adw.ActionRow({
-            title: _('Cursor Foreground'),
-            subtitle: _('Outline/details color (built-in cursor only)'),
-        });
-        const fgButton = new Gtk.ColorDialogButton({
-            dialog: new Gtk.ColorDialog({ with_alpha: true }),
-            rgba: bytesToRgba(getRgbaBytes('cursor-fg-rgba', [0, 0, 0, 255])),
-            valign: Gtk.Align.CENTER,
-        });
-        fgRow.add_suffix(fgButton);
-        fgRow.activatable_widget = fgButton;
-        cursorGroup.add(fgRow);
-
-        fgButton.connect('notify::rgba', () => {
-            setRgbaBytes('cursor-fg-rgba', rgbaToBytes(fgButton.rgba));
-        });
-        settings.connect('changed::cursor-fg-rgba', () => {
-            fgButton.rgba = bytesToRgba(getRgbaBytes('cursor-fg-rgba', [0, 0, 0, 255]));
-        });
-
-        const bgRow = new Adw.ActionRow({
-            title: _('Cursor Background'),
-            subtitle: _('Fill color (built-in cursor only)'),
-        });
-        const bgButton = new Gtk.ColorDialogButton({
-            dialog: new Gtk.ColorDialog({ with_alpha: true }),
-            rgba: bytesToRgba(getRgbaBytes('cursor-bg-rgba', [255, 255, 255, 255])),
-            valign: Gtk.Align.CENTER,
-        });
-        bgRow.add_suffix(bgButton);
-        bgRow.activatable_widget = bgButton;
-        cursorGroup.add(bgRow);
-
-        bgButton.connect('notify::rgba', () => {
-            setRgbaBytes('cursor-bg-rgba', rgbaToBytes(bgButton.rgba));
-        });
-        settings.connect('changed::cursor-bg-rgba', () => {
-            bgButton.rgba = bytesToRgba(getRgbaBytes('cursor-bg-rgba', [255, 255, 255, 255]));
-        });
-
-        // Debug group
-        const debugGroup = new Adw.PreferencesGroup({
-            title: _('Debug'),
-            description: _('Troubleshooting options (use with care)'),
-        });
-        page.add(debugGroup);
-
-        const debugModeRow = new Adw.SwitchRow({
-            title: _('Enable Debug Mode'),
-            subtitle: _('Enables extra logging and an emergency abort hotkey'),
-            active: settings.get_boolean('debug-mode'),
-        });
-        debugGroup.add(debugModeRow);
-
-        debugModeRow.connect('notify::active', () => {
-            settings.set_boolean('debug-mode', debugModeRow.active);
-        });
-        settings.connect('changed::debug-mode', () => {
-            debugModeRow.active = settings.get_boolean('debug-mode');
-        });
-
-        const debugShowInfoRow = new Adw.SwitchRow({
-            title: _('Show Debug Info'),
-            subtitle: _('Show an on-screen debug overlay while locked'),
-            active: settings.get_boolean('debug-show-info'),
-            sensitive: settings.get_boolean('debug-mode'),
-        });
-        debugGroup.add(debugShowInfoRow);
-
-        debugShowInfoRow.connect('notify::active', () => {
-            settings.set_boolean('debug-show-info', debugShowInfoRow.active);
-        });
-        settings.connect('changed::debug-show-info', () => {
-            debugShowInfoRow.active = settings.get_boolean('debug-show-info');
-        });
-
-        const abortUseLockHotkeyRow = new Adw.SwitchRow({
-            title: _('Abort Hotkey = Lock Hotkey'),
-            subtitle: _('Use the same shortcut for abort while locked'),
-            active: settings.get_boolean('debug-abort-use-lock-hotkey'),
-            sensitive: settings.get_boolean('debug-mode'),
-        });
-        debugGroup.add(abortUseLockHotkeyRow);
-
-        const abortHotkeyRow = new Adw.ActionRow({
-            title: _('Abort Hotkey (Debug)'),
-            subtitle: _('Unlocks without password when Debug Mode is enabled'),
-        });
-
-        const abortShortcutLabel = new Gtk.ShortcutLabel({
-            accelerator: getHotkey('debug-abort-hotkey', DEFAULT_ABORT_HOTKEY),
-            valign: Gtk.Align.CENTER,
-        });
-        abortHotkeyRow.add_suffix(abortShortcutLabel);
-
-        const abortEditButton = new Gtk.Button({
-            icon_name: 'edit-symbolic',
-            valign: Gtk.Align.CENTER,
-            css_classes: ['flat'],
-        });
-        abortHotkeyRow.add_suffix(abortEditButton);
-
-        const abortClearButton = new Gtk.Button({
-            icon_name: 'edit-clear-symbolic',
-            valign: Gtk.Align.CENTER,
-            css_classes: ['flat'],
-            tooltip_text: _('Reset to default'),
-        });
-        abortHotkeyRow.add_suffix(abortClearButton);
-
-        debugGroup.add(abortHotkeyRow);
-
-        const syncAbortHotkeyUi = () => {
-            const debugEnabled = settings.get_boolean('debug-mode');
-            const useLock = settings.get_boolean('debug-abort-use-lock-hotkey');
-            const lockAccel = getHotkey('lock-hotkey', DEFAULT_LOCK_HOTKEY);
-            const abortAccel = getHotkey('debug-abort-hotkey', DEFAULT_ABORT_HOTKEY);
-
-            debugShowInfoRow.sensitive = debugEnabled;
-            abortUseLockHotkeyRow.sensitive = debugEnabled;
-
-            abortHotkeyRow.sensitive = debugEnabled && !useLock;
-            abortEditButton.sensitive = debugEnabled && !useLock;
-            abortClearButton.sensitive = debugEnabled && !useLock;
-
-            abortShortcutLabel.accelerator = useLock ? lockAccel : abortAccel;
-        };
-
-        abortUseLockHotkeyRow.connect('notify::active', () => {
-            settings.set_boolean('debug-abort-use-lock-hotkey', abortUseLockHotkeyRow.active);
-
-            const lockAccel = getHotkey('lock-hotkey', DEFAULT_LOCK_HOTKEY);
-            if (abortUseLockHotkeyRow.active) {
-                // Preserve the current custom abort hotkey, then force abort to match lock.
-                settings.set_strv('debug-abort-hotkey-custom', [getHotkey('debug-abort-hotkey', DEFAULT_ABORT_HOTKEY)]);
-                setHotkey('debug-abort-hotkey', lockAccel);
-            } else {
-                // Restore previous custom abort hotkey.
-                setHotkey('debug-abort-hotkey', getHotkey('debug-abort-hotkey-custom', DEFAULT_ABORT_HOTKEY));
+            const combo = comboRows.get(key);
+            if (combo)
+                combo.row.selected = Math.max(0, combo.values.indexOf(settings.get_string(key)));
+            const color = colorButtons.get(key);
+            if (color) {
+                const bytes = settings.get_value(key).deep_unpack();
+                color.rgba = new Gdk.RGBA({red: bytes[0] / 255, green: bytes[1] / 255, blue: bytes[2] / 255, alpha: bytes[3] / 255});
             }
-
-            syncAbortHotkeyUi();
+            shortcutLabels.get('lock-hotkey').accelerator = settings.get_strv('lock-hotkey')[0] ?? '';
+            shortcutLabels.get('debug-abort-hotkey').accelerator = settings.get_strv(useActivation.active ? 'lock-hotkey' : 'debug-abort-hotkey')[0] ?? '';
+            cursor.sensitive = settings.get_string('cursor-mode') === 'lock-icon';
+            const normal = settings.get_string('lock-type') === 'normal';
+            const following = settings.get_boolean('normal-prompt-follow-cursor');
+            follow.sensitive = normal;
+            comboRows.get('normal-prompt-cursor-anchor').row.sensitive = normal && following;
+            monitorRow.sensitive = normal && !following;
+            for (const [positionKey, row] of positionRows)
+                row.sensitive = normal && (positionKey.includes('offset') ? following : !following);
+            debugInfo.sensitive = settings.get_boolean('debug-mode');
+            useActivation.sensitive = settings.get_boolean('debug-mode');
+            abortRow.sensitive = settings.get_boolean('debug-mode') && !useActivation.active;
         });
-
-        settings.connect('changed::debug-mode', syncAbortHotkeyUi);
-        settings.connect('changed::debug-abort-use-lock-hotkey', () => {
-            const useLock = settings.get_boolean('debug-abort-use-lock-hotkey');
-            if (!useLock) {
-                const lockAccel = getHotkey('lock-hotkey', DEFAULT_LOCK_HOTKEY);
-                const abortAccel = getHotkey('debug-abort-hotkey', DEFAULT_ABORT_HOTKEY);
-                const customAccel = getHotkey('debug-abort-hotkey-custom', DEFAULT_ABORT_HOTKEY);
-                if (abortAccel === lockAccel && customAccel !== lockAccel)
-                    setHotkey('debug-abort-hotkey', customAccel);
-            }
-            syncAbortHotkeyUi();
+        window.connect('close-request', () => {
+            this._cancellable.cancel();
+            settings.disconnect(settingsId);
+            for (const dialog of this._dialogs)
+                dialog.destroy();
+            this._dialogs.clear();
+            return false;
         });
-        settings.connect('changed::debug-abort-hotkey', () => {
-            const useLock = settings.get_boolean('debug-abort-use-lock-hotkey');
-            if (!useLock)
-                settings.set_strv('debug-abort-hotkey-custom', [getHotkey('debug-abort-hotkey', DEFAULT_ABORT_HOTKEY)]);
-            syncAbortHotkeyUi();
-        });
-        settings.connect('changed::lock-hotkey', () => {
-            const useLock = settings.get_boolean('debug-abort-use-lock-hotkey');
-            if (useLock)
-                setHotkey('debug-abort-hotkey', getHotkey('lock-hotkey', DEFAULT_LOCK_HOTKEY));
-            syncAbortHotkeyUi();
-        });
-
-        settings.connect('changed::debug-show-info', syncAbortHotkeyUi);
-        settings.connect('changed::debug-abort-hotkey-custom', syncAbortHotkeyUi);
-
-        syncAbortHotkeyUi();
-
-        abortEditButton.connect('clicked', () => {
-            this._showHotkeyDialog(window, settings, 'debug-abort-hotkey', abortShortcutLabel);
-        });
-
-        abortClearButton.connect('clicked', () => {
-            setHotkey('debug-abort-hotkey', DEFAULT_ABORT_HOTKEY);
-            abortShortcutLabel.accelerator = DEFAULT_ABORT_HOTKEY;
-        });
-        
-        // Warning group
-        const warningGroup = new Adw.PreferencesGroup({
-            title: _('Important Notes'),
-        });
-        page.add(warningGroup);
-        
-        const warningRow = new Adw.ActionRow({
-            title: _('Security Notice'),
-            subtitle: _('This extension uses your system login password. No password is stored by the extension.'),
-        });
-        const warningIcon = new Gtk.Image({
-            icon_name: 'dialog-warning-symbolic',
-            valign: Gtk.Align.CENTER,
-        });
-        warningRow.add_prefix(warningIcon);
-        warningGroup.add(warningRow);
     }
-    
-    _showHotkeyDialog(window, settings, settingsKey, shortcutLabel) {
-        const dialog = new Gtk.Dialog({
-            title: _('Set Hotkey'),
-            modal: true,
-            transient_for: window,
-            default_width: 400,
-            default_height: 200,
-        });
-        
+
+    _showShortcutEditor(window, settings, key) {
+        const dialog = new Gtk.Dialog({title: _('Set Shortcut'), transient_for: window, modal: true, destroy_with_parent: true, default_width: 440});
+        this._dialogs.add(dialog);
         dialog.add_button(_('Cancel'), Gtk.ResponseType.CANCEL);
-        
-        const contentArea = dialog.get_content_area();
-        contentArea.set_margin_top(20);
-        contentArea.set_margin_bottom(20);
-        contentArea.set_margin_start(20);
-        contentArea.set_margin_end(20);
-        contentArea.set_spacing(20);
-        
-        const label = new Gtk.Label({
-            label: _('Press your desired key combination...'),
-            halign: Gtk.Align.CENTER,
-        });
-        contentArea.append(label);
-        
-        const hotkeyDisplay = new Gtk.ShortcutLabel({
-            accelerator: '',
-            halign: Gtk.Align.CENTER,
-        });
-        contentArea.append(hotkeyDisplay);
-        
-        // Key event controller
-        const keyController = new Gtk.EventControllerKey();
-        let capturedAccel = '';
-        let saveTimeoutId = null;
-        
-        keyController.connect('key-pressed', (controller, keyval, keycode, state) => {
-            // Escape cancels
+        const save = dialog.add_button(_('Save'), Gtk.ResponseType.OK);
+        save.sensitive = false;
+        const content = dialog.get_content_area();
+        content.set_margin_top(24);
+        content.set_margin_bottom(24);
+        content.set_margin_start(24);
+        content.set_margin_end(24);
+        content.set_spacing(16);
+        content.append(new Gtk.Label({label: _('Press the desired key combination. Escape cancels.'), wrap: true}));
+        const preview = new Gtk.ShortcutLabel({accelerator: ''});
+        content.append(preview);
+        const controller = new Gtk.EventControllerKey({propagation_phase: Gtk.PropagationPhase.CAPTURE});
+        controller.connect('key-pressed', (keyController, keyval, _keycode, state) => {
             if (keyval === Gdk.KEY_Escape) {
                 dialog.response(Gtk.ResponseType.CANCEL);
                 return true;
             }
-
-            // Get modifier state
-            const mask = state & Gtk.accelerator_get_default_mod_mask();
-            
-            // Ignore lone modifier keys
-            const isModifier = [
-                Gdk.KEY_Shift_L, Gdk.KEY_Shift_R,
-                Gdk.KEY_Control_L, Gdk.KEY_Control_R,
-                Gdk.KEY_Alt_L, Gdk.KEY_Alt_R,
-                Gdk.KEY_Super_L, Gdk.KEY_Super_R,
-                Gdk.KEY_Meta_L, Gdk.KEY_Meta_R,
-            ].includes(keyval);
-            
-            if (isModifier) {
-                return false;
-            }
-            
-            // Build accelerator string
-            capturedAccel = Gtk.accelerator_name(keyval, mask);
-            hotkeyDisplay.accelerator = capturedAccel;
-            
-            // Save after a short delay
-            if (capturedAccel) {
-                if (saveTimeoutId) {
-                    GLib.source_remove(saveTimeoutId);
-                    saveTimeoutId = null;
-                }
-
-                saveTimeoutId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 500, () => {
-                    saveTimeoutId = null;
-                    if (!capturedAccel)
-                        return GLib.SOURCE_REMOVE;
-
-                    settings.set_strv(settingsKey, [capturedAccel]);
-                    shortcutLabel.accelerator = capturedAccel;
-                    dialog.response(Gtk.ResponseType.OK);
-                    return GLib.SOURCE_REMOVE;
-                });
-            }
-            
+            if (keyController.get_current_event().is_modifier())
+                return true;
+            preview.accelerator = Gtk.accelerator_name(keyval, state & Gtk.accelerator_get_default_mod_mask());
+            save.sensitive = preview.accelerator !== '';
             return true;
         });
-        
-        dialog.add_controller(keyController);
-        
-        dialog.connect('response', () => {
-            if (saveTimeoutId) {
-                GLib.source_remove(saveTimeoutId);
-                saveTimeoutId = null;
-            }
+        dialog.add_controller(controller);
+        dialog.connect('response', (_dialog, response) => {
+            if (response === Gtk.ResponseType.OK)
+                settings.set_strv(key, [preview.accelerator]);
+            this._dialogs.delete(dialog);
             dialog.destroy();
         });
-        
         dialog.present();
     }
 
-    _getSavedTextEntries(settings, entriesKey) {
-        let raw = '[]';
+    _showStyleEditor(window, settings, key, title, description) {
+        const entriesKey = key + '-saved-entries';
+        let entries;
+        let savedEntriesValid = true;
         try {
-            raw = settings.get_string(entriesKey) ?? '[]';
-        } catch (e) {
-            raw = '[]';
+            entries = JSON.parse(settings.get_string(entriesKey));
+            if (!Array.isArray(entries))
+                throw new Error('Saved styles must be an array');
+            entries = entries.filter(entry => typeof entry?.name === 'string' && entry.name.trim() && typeof entry.code === 'string')
+                .map(entry => ({name: entry.name.trim(), code: entry.code}));
+        } catch (error) {
+            console.error('Stealth Lock: could not read saved styles', error);
+            entries = [];
+            savedEntriesValid = false;
         }
-
-        if (!raw)
-            raw = '[]';
-
-        let parsed = [];
-        try {
-            parsed = JSON.parse(raw);
-        } catch (e) {
-            parsed = [];
-        }
-
-        if (!Array.isArray(parsed))
-            return [];
-
-        return parsed
-            .map(entry => {
-                const name = typeof entry?.name === 'string' ? entry.name.trim() : '';
-                const code = typeof entry?.code === 'string' ? entry.code : '';
-                if (!name)
-                    return null;
-                return { name, code };
-            })
-            .filter(entry => entry !== null);
-    }
-
-    _setSavedTextEntries(settings, entriesKey, entries) {
-        const normalized = [];
-        for (const entry of Array.isArray(entries) ? entries : []) {
-            const name = typeof entry?.name === 'string' ? entry.name.trim() : '';
-            if (!name)
-                continue;
-
-            normalized.push({
-                name,
-                code: typeof entry?.code === 'string' ? entry.code : '',
-            });
-        }
-
-        settings.set_string(entriesKey, JSON.stringify(normalized));
-    }
-
-    _makeUniqueSavedEntryName(entries, baseName, excludeIndex = -1) {
-        const trimmed = (baseName ?? '').trim() || _('Untitled');
-        const taken = new Set(
-            entries
-                .map((entry, index) => index === excludeIndex ? '' : (entry?.name ?? '').trim().toLowerCase())
-                .filter(Boolean)
-        );
-
-        if (!taken.has(trimmed.toLowerCase()))
-            return trimmed;
-
-        let suffix = 2;
-        let candidate = `${trimmed} (${suffix})`;
-        while (taken.has(candidate.toLowerCase())) {
-            suffix += 1;
-            candidate = `${trimmed} (${suffix})`;
-        }
-
-        return candidate;
-    }
-
-    _getSavedEntryPreview(code) {
-        const lines = String(code ?? '')
-            .split(/\r?\n/)
-            .map(line => line.trim())
-            .filter(Boolean);
-        const preview = lines[0] || _('Empty snippet');
-        if (preview.length <= 72)
-            return preview;
-        return `${preview.slice(0, 69)}...`;
-    }
-
-    _promptForSavedEntryName(window, options) {
-        const dialog = new Gtk.Dialog({
-            title: options?.title ?? _('Entry Name'),
-            modal: true,
-            transient_for: window,
-            default_width: 420,
-        });
-
+        const dialog = new Gtk.Dialog({title, transient_for: window, modal: true, destroy_with_parent: true, default_width: 780, default_height: 620});
+        this._dialogs.add(dialog);
         dialog.add_button(_('Cancel'), Gtk.ResponseType.CANCEL);
-        const saveButton = dialog.add_button(options?.acceptLabel ?? _('Save'), Gtk.ResponseType.OK);
-
-        const contentArea = dialog.get_content_area();
-        contentArea.set_margin_top(12);
-        contentArea.set_margin_bottom(12);
-        contentArea.set_margin_start(12);
-        contentArea.set_margin_end(12);
-        contentArea.set_spacing(12);
-
-        if (options?.description) {
-            const label = new Gtk.Label({
-                label: options.description,
-                wrap: true,
-                xalign: 0,
-            });
-            contentArea.append(label);
-        }
-
-        const entry = new Gtk.Entry({
-            text: options?.initialName ?? '',
-            activates_default: true,
-            hexpand: true,
-        });
-        contentArea.append(entry);
-
-        dialog.set_default_response(Gtk.ResponseType.OK);
-        saveButton.sensitive = entry.get_text().trim().length > 0;
-
-        entry.connect('changed', () => {
-            saveButton.sensitive = entry.get_text().trim().length > 0;
-        });
-
-        dialog.connect('response', (d, response) => {
-            try {
-                if (response === Gtk.ResponseType.OK) {
-                    const entries = Array.isArray(options?.entries) ? options.entries : [];
-                    const excludeIndex = Number.isInteger(options?.excludeIndex) ? options.excludeIndex : -1;
-                    const name = this._makeUniqueSavedEntryName(entries, entry.get_text(), excludeIndex);
-                    options?.onConfirm?.(name);
-                }
-            } finally {
-                d.destroy();
-            }
-        });
-
-        dialog.present();
-    }
-
-    _promptForSavedEntrySelection(window, title, description, entries, onConfirm) {
-        if (!Array.isArray(entries) || entries.length === 0)
-            return;
-
-        const dialog = new Gtk.Dialog({
-            title,
-            modal: true,
-            transient_for: window,
-            default_width: 480,
-        });
-
-        dialog.add_button(_('Cancel'), Gtk.ResponseType.CANCEL);
-        dialog.add_button(_('Replace'), Gtk.ResponseType.OK);
-
-        const contentArea = dialog.get_content_area();
-        contentArea.set_margin_top(12);
-        contentArea.set_margin_bottom(12);
-        contentArea.set_margin_start(12);
-        contentArea.set_margin_end(12);
-        contentArea.set_spacing(12);
-
-        if (description) {
-            const label = new Gtk.Label({
-                label: description,
-                wrap: true,
-                xalign: 0,
-            });
-            contentArea.append(label);
-        }
+        dialog.add_button(_('Apply'), Gtk.ResponseType.OK);
+        const content = dialog.get_content_area();
+        content.set_margin_top(16);
+        content.set_margin_bottom(16);
+        content.set_margin_start(16);
+        content.set_margin_end(16);
+        content.set_spacing(12);
+        content.append(new Gtk.Label({label: description + '. ' + _('Use CSS declarations only. Leave blank to use the default style.'), wrap: true, xalign: 0}));
+        if (!savedEntriesValid)
+            content.append(new Gtk.Label({label: _('Saved styles could not be read. Their existing GSettings value has been retained.'), wrap: true, xalign: 0}));
 
         const names = Gtk.StringList.new(entries.map(entry => entry.name));
-        const dropdown = new Gtk.DropDown({
-            model: names,
-            selected: 0,
-            hexpand: true,
+        const toolbar = new Gtk.Box({orientation: Gtk.Orientation.HORIZONTAL, spacing: 8});
+        const selector = new Gtk.DropDown({model: names, hexpand: true});
+        const load = new Gtk.Button({label: _('Use Saved'), sensitive: entries.length > 0});
+        toolbar.append(selector);
+        toolbar.append(load);
+        content.append(toolbar);
+        const name = new Gtk.Entry({placeholder_text: _('Saved style name'), text: entries[0]?.name ?? ''});
+        content.append(name);
+        const actions = new Gtk.Box({orientation: Gtk.Orientation.HORIZONTAL, spacing: 8});
+        const add = new Gtk.Button({label: _('Save As New'), sensitive: savedEntriesValid && name.text.trim() !== ''});
+        const replace = new Gtk.Button({label: _('Replace Saved'), sensitive: entries.length > 0});
+        const rename = new Gtk.Button({label: _('Rename'), sensitive: entries.length > 0});
+        const remove = new Gtk.Button({label: _('Delete'), sensitive: entries.length > 0, css_classes: ['destructive-action']});
+        for (const button of [add, replace, rename, remove])
+            actions.append(button);
+        content.append(actions);
+        const scroll = new Gtk.ScrolledWindow({hexpand: true, vexpand: true});
+        const editor = new Gtk.TextView({monospace: true, wrap_mode: Gtk.WrapMode.NONE});
+        const buffer = editor.get_buffer();
+        buffer.set_text(settings.get_string(key), -1);
+        scroll.set_child(editor);
+        content.append(scroll);
+
+        selector.connect('notify::selected', () => {
+            const entry = entries[selector.selected];
+            name.text = entry?.name ?? '';
+            load.sensitive = !!entry;
+            replace.sensitive = !!entry;
+            rename.sensitive = !!entry && name.text.trim() !== '';
+            remove.sensitive = !!entry;
         });
-        contentArea.append(dropdown);
-
-        const previewLabel = new Gtk.Label({
-            label: this._getSavedEntryPreview(entries[0]?.code ?? ''),
-            wrap: true,
-            xalign: 0,
+        name.connect('changed', () => {
+            add.sensitive = savedEntriesValid && name.text.trim() !== '';
+            rename.sensitive = !!entries[selector.selected] && name.text.trim() !== '';
         });
-        previewLabel.add_css_class('dim-label');
-        contentArea.append(previewLabel);
-
-        dropdown.connect('notify::selected', () => {
-            previewLabel.label = this._getSavedEntryPreview(entries[dropdown.selected]?.code ?? '');
+        load.connect('clicked', () => {
+            const entry = entries[selector.selected];
+            buffer.set_text(entry.code, -1);
+            settings.set_string(key, entry.code);
         });
-
-        dialog.connect('response', (d, response) => {
-            try {
-                if (response === Gtk.ResponseType.OK) {
-                    const index = Math.max(0, Math.min(entries.length - 1, dropdown.selected));
-                    onConfirm?.(index);
-                }
-            } finally {
-                d.destroy();
-            }
+        add.connect('clicked', () => {
+            const base = name.text.trim();
+            const taken = new Set(entries.map(entry => entry.name.toLowerCase()));
+            let uniqueName = base;
+            let suffix = 2;
+            while (taken.has(uniqueName.toLowerCase()))
+                uniqueName = base + ' (' + suffix++ + ')';
+            const code = buffer.get_text(buffer.get_start_iter(), buffer.get_end_iter(), false);
+            entries.push({name: uniqueName, code});
+            settings.set_string(entriesKey, JSON.stringify(entries));
+            names.splice(0, names.get_n_items(), entries.map(entry => entry.name));
+            selector.selected = entries.length - 1;
+            name.text = uniqueName;
         });
-
-        dialog.present();
-    }
-
-    _showSavedTextEntriesDialog(window, settings, settingsKey, entriesKey, title, description) {
-        const dialog = new Gtk.Dialog({
-            title: _('%s Saved Entries').format(title),
-            modal: true,
-            transient_for: window,
-            default_width: 760,
-            default_height: 520,
+        replace.connect('clicked', () => {
+            entries[selector.selected].code = buffer.get_text(buffer.get_start_iter(), buffer.get_end_iter(), false);
+            settings.set_string(entriesKey, JSON.stringify(entries));
         });
-
-        dialog.add_button(_('Close'), Gtk.ResponseType.CLOSE);
-
-        const contentArea = dialog.get_content_area();
-        contentArea.set_margin_top(12);
-        contentArea.set_margin_bottom(12);
-        contentArea.set_margin_start(12);
-        contentArea.set_margin_end(12);
-        contentArea.set_spacing(12);
-
-        const headerBox = new Gtk.Box({
-            orientation: Gtk.Orientation.HORIZONTAL,
-            spacing: 12,
+        rename.connect('clicked', () => {
+            const index = selector.selected;
+            const base = name.text.trim();
+            const taken = new Set(entries.filter((_entry, entryIndex) => entryIndex !== index).map(entry => entry.name.toLowerCase()));
+            let uniqueName = base;
+            let suffix = 2;
+            while (taken.has(uniqueName.toLowerCase()))
+                uniqueName = base + ' (' + suffix++ + ')';
+            entries[index].name = uniqueName;
+            settings.set_string(entriesKey, JSON.stringify(entries));
+            names.splice(0, names.get_n_items(), entries.map(entry => entry.name));
+            selector.selected = index;
+            name.text = uniqueName;
         });
-        contentArea.append(headerBox);
-
-        const headerLabel = new Gtk.Label({
-            label: description,
-            wrap: true,
-            xalign: 0,
-            hexpand: true,
+        remove.connect('clicked', () => {
+            entries.splice(selector.selected, 1);
+            settings.set_string(entriesKey, JSON.stringify(entries));
+            names.splice(0, names.get_n_items(), entries.map(entry => entry.name));
+            selector.selected = entries.length ? 0 : Gtk.INVALID_LIST_POSITION;
+            name.text = entries[0]?.name ?? '';
         });
-        headerBox.append(headerLabel);
-
-        const addButton = new Gtk.Button({
-            label: _('Add Entry'),
-            valign: Gtk.Align.CENTER,
-        });
-        headerBox.append(addButton);
-
-        const scrolled = new Gtk.ScrolledWindow({
-            hexpand: true,
-            vexpand: true,
-        });
-        scrolled.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC);
-        contentArea.append(scrolled);
-
-        const listBox = new Gtk.ListBox({
-            selection_mode: Gtk.SelectionMode.NONE,
-            activate_on_single_click: true,
-        });
-        scrolled.set_child(listBox);
-
-        const refreshList = () => {
-            let child = listBox.get_first_child();
-            while (child) {
-                const next = child.get_next_sibling();
-                listBox.remove(child);
-                child = next;
-            }
-
-            const entries = this._getSavedTextEntries(settings, entriesKey);
-            if (entries.length === 0) {
-                const placeholderRow = new Gtk.ListBoxRow({
-                    selectable: false,
-                    activatable: false,
-                });
-                const placeholderLabel = new Gtk.Label({
-                    label: _('No saved entries yet.'),
-                    xalign: 0,
-                    margin_top: 16,
-                    margin_bottom: 16,
-                    margin_start: 12,
-                    margin_end: 12,
-                });
-                placeholderLabel.add_css_class('dim-label');
-                placeholderRow.set_child(placeholderLabel);
-                listBox.append(placeholderRow);
-                return;
-            }
-
-            entries.forEach((entry, index) => {
-                const row = new Gtk.ListBoxRow({
-                    selectable: false,
-                    activatable: true,
-                });
-                row._entryIndex = index;
-                row.set_tooltip_text(_('Click to load this entry'));
-
-                const rowBox = new Gtk.Box({
-                    orientation: Gtk.Orientation.HORIZONTAL,
-                    spacing: 12,
-                    margin_top: 10,
-                    margin_bottom: 10,
-                    margin_start: 12,
-                    margin_end: 12,
-                });
-                row.set_child(rowBox);
-
-                const textBox = new Gtk.Box({
-                    orientation: Gtk.Orientation.VERTICAL,
-                    spacing: 4,
-                    hexpand: true,
-                });
-                rowBox.append(textBox);
-
-                const nameLabel = new Gtk.Label({
-                    label: entry.name,
-                    xalign: 0,
-                    hexpand: true,
-                });
-                nameLabel.add_css_class('heading');
-                textBox.append(nameLabel);
-
-                const previewLabel = new Gtk.Label({
-                    label: this._getSavedEntryPreview(entry.code),
-                    wrap: true,
-                    xalign: 0,
-                });
-                previewLabel.add_css_class('dim-label');
-                textBox.append(previewLabel);
-
-                const editButton = new Gtk.Button({
-                    icon_name: 'document-edit-symbolic',
-                    valign: Gtk.Align.CENTER,
-                    css_classes: ['flat'],
-                    tooltip_text: _('Edit entry'),
-                });
-                rowBox.append(editButton);
-
-                const renameButton = new Gtk.Button({
-                    icon_name: 'document-properties-symbolic',
-                    valign: Gtk.Align.CENTER,
-                    css_classes: ['flat'],
-                    tooltip_text: _('Rename entry'),
-                });
-                rowBox.append(renameButton);
-
-                editButton.connect('clicked', () => {
-                    const currentEntries = this._getSavedTextEntries(settings, entriesKey);
-                    const currentEntry = currentEntries[index];
-                    if (!currentEntry)
-                        return;
-
-                    this._showTextEditDialog(
-                        window,
-                        settings,
-                        null,
-                        _('%s Entry').format(title),
-                        _('Edit the saved entry code.'),
-                        {
-                            initialText: currentEntry.code,
-                            primarySaveLabel: _('Save Entry'),
-                            persistCurrentValue: false,
-                            onSave: text => {
-                                const updatedEntries = this._getSavedTextEntries(settings, entriesKey);
-                                if (!updatedEntries[index])
-                                    return;
-                                updatedEntries[index].code = text;
-                                this._setSavedTextEntries(settings, entriesKey, updatedEntries);
-                            },
-                        }
-                    );
-                });
-
-                renameButton.connect('clicked', () => {
-                    const currentEntries = this._getSavedTextEntries(settings, entriesKey);
-                    const currentEntry = currentEntries[index];
-                    if (!currentEntry)
-                        return;
-
-                    this._promptForSavedEntryName(window, {
-                        title: _('Rename Entry'),
-                        description: _('Choose a new name for this saved entry.'),
-                        initialName: currentEntry.name,
-                        entries: currentEntries,
-                        excludeIndex: index,
-                        acceptLabel: _('Rename'),
-                        onConfirm: name => {
-                            const updatedEntries = this._getSavedTextEntries(settings, entriesKey);
-                            if (!updatedEntries[index])
-                                return;
-                            updatedEntries[index].name = name;
-                            this._setSavedTextEntries(settings, entriesKey, updatedEntries);
-                        },
-                    });
-                });
-
-                listBox.append(row);
-            });
-        };
-
-        listBox.connect('row-activated', (box, row) => {
-            const index = row?._entryIndex;
-            if (!Number.isInteger(index))
-                return;
-
-            const entries = this._getSavedTextEntries(settings, entriesKey);
-            const entry = entries[index];
-            if (!entry)
-                return;
-
-            settings.set_string(settingsKey, entry.code);
+        dialog.connect('response', (_dialog, response) => {
+            if (response === Gtk.ResponseType.OK)
+                settings.set_string(key, buffer.get_text(buffer.get_start_iter(), buffer.get_end_iter(), false));
+            this._dialogs.delete(dialog);
             dialog.destroy();
         });
-
-        addButton.connect('clicked', () => {
-            const currentEntries = this._getSavedTextEntries(settings, entriesKey);
-            this._promptForSavedEntryName(window, {
-                title: _('New Entry'),
-                description: _('Choose a name for the new saved entry.'),
-                entries: currentEntries,
-                acceptLabel: _('Continue'),
-                onConfirm: name => {
-                    this._showTextEditDialog(
-                        window,
-                        settings,
-                        null,
-                        _('%s Entry').format(title),
-                        _('Enter the code for the new saved entry.'),
-                        {
-                            initialText: '',
-                            primarySaveLabel: _('Create Entry'),
-                            persistCurrentValue: false,
-                            onSave: text => {
-                                const updatedEntries = this._getSavedTextEntries(settings, entriesKey);
-                                updatedEntries.push({ name, code: text });
-                                this._setSavedTextEntries(settings, entriesKey, updatedEntries);
-                            },
-                        }
-                    );
-                },
-            });
-        });
-
-        const changedId = settings.connect(`changed::${entriesKey}`, refreshList);
-        dialog.connect('destroy', () => {
-            try {
-                settings.disconnect(changedId);
-            } catch (e) {
-                // Ignore disconnect errors
-            }
-        });
-
-        refreshList();
-        dialog.present();
-    }
-
-    _showTextEditDialog(window, settings, settingsKey, title, description, options = {}) {
-        const dialog = new Gtk.Dialog({
-            title,
-            modal: true,
-            transient_for: window,
-            default_width: 720,
-            default_height: 520,
-        });
-
-        dialog.add_button(_('Cancel'), Gtk.ResponseType.CANCEL);
-        const RESPONSE_SAVE_AS_ENTRY = 1001;
-        const RESPONSE_REPLACE_ENTRY = 1002;
-        const supportsSavedEntries = !!(settingsKey && options.entriesKey);
-        let replaceEntryButton = null;
-        if (supportsSavedEntries) {
-            dialog.add_button(_('Save As New Entry'), RESPONSE_SAVE_AS_ENTRY);
-            replaceEntryButton = dialog.add_button(_('Replace Entry'), RESPONSE_REPLACE_ENTRY);
-            replaceEntryButton.sensitive = this._getSavedTextEntries(settings, options.entriesKey).length > 0;
-        }
-        dialog.add_button(options.primarySaveLabel ?? _('Save'), Gtk.ResponseType.OK);
-
-        const contentArea = dialog.get_content_area();
-        contentArea.set_margin_top(12);
-        contentArea.set_margin_bottom(12);
-        contentArea.set_margin_start(12);
-        contentArea.set_margin_end(12);
-        contentArea.set_spacing(12);
-
-        if (description) {
-            const label = new Gtk.Label({
-                label: description,
-                wrap: true,
-                xalign: 0,
-            });
-            contentArea.append(label);
-        }
-
-        const scrolled = new Gtk.ScrolledWindow({
-            hexpand: true,
-            vexpand: true,
-        });
-        scrolled.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC);
-
-        const textView = new Gtk.TextView({
-            monospace: true,
-            wrap_mode: Gtk.WrapMode.NONE,
-        });
-        scrolled.set_child(textView);
-        contentArea.append(scrolled);
-
-        const buffer = textView.get_buffer();
-        const initialText = Object.prototype.hasOwnProperty.call(options, 'initialText')
-            ? options.initialText
-            : (settingsKey ? (settings.get_string(settingsKey) ?? '') : '');
-        buffer.set_text(initialText, -1);
-
-        const getBufferText = () => {
-            const start = buffer.get_start_iter();
-            const end = buffer.get_end_iter();
-            return buffer.get_text(start, end, false);
-        };
-
-        const persistCurrentValue = text => {
-            const shouldPersist = options.persistCurrentValue ?? !!settingsKey;
-            if (shouldPersist && settingsKey)
-                settings.set_string(settingsKey, text);
-        };
-
-        const savePrimaryText = text => {
-            if (typeof options.onSave === 'function') {
-                options.onSave(text);
-            } else {
-                persistCurrentValue(text);
-            }
-        };
-
-        dialog.connect('response', (d, response) => {
-            try {
-                if (response === Gtk.ResponseType.OK) {
-                    savePrimaryText(getBufferText());
-                    return;
-                }
-
-                if (response === RESPONSE_SAVE_AS_ENTRY && supportsSavedEntries) {
-                    const text = getBufferText();
-                    const entries = this._getSavedTextEntries(settings, options.entriesKey);
-                    this._promptForSavedEntryName(window, {
-                        title: _('Save As New Entry'),
-                        description: _('Choose a name for the new saved entry.'),
-                        initialName: title,
-                        entries,
-                        acceptLabel: _('Save'),
-                        onConfirm: name => {
-                            const updatedEntries = this._getSavedTextEntries(settings, options.entriesKey);
-                            updatedEntries.push({ name, code: text });
-                            this._setSavedTextEntries(settings, options.entriesKey, updatedEntries);
-                            persistCurrentValue(text);
-                            d.destroy();
-                        },
-                    });
-                    return;
-                }
-
-                if (response === RESPONSE_REPLACE_ENTRY && supportsSavedEntries) {
-                    const entries = this._getSavedTextEntries(settings, options.entriesKey);
-                    if (entries.length === 0)
-                        return;
-
-                    const text = getBufferText();
-                    this._promptForSavedEntrySelection(
-                        window,
-                        _('Replace Saved Entry'),
-                        _('Choose which saved entry should be replaced with the current editor content.'),
-                        entries,
-                        index => {
-                            const updatedEntries = this._getSavedTextEntries(settings, options.entriesKey);
-                            if (!updatedEntries[index])
-                                return;
-                            updatedEntries[index].code = text;
-                            this._setSavedTextEntries(settings, options.entriesKey, updatedEntries);
-                            persistCurrentValue(text);
-                            d.destroy();
-                        }
-                    );
-                    return;
-                }
-            } catch (e) {
-                // Ignore
-            } finally {
-                if (response !== RESPONSE_SAVE_AS_ENTRY && response !== RESPONSE_REPLACE_ENTRY)
-                    d.destroy();
-            }
-        });
-
         dialog.present();
     }
 }
