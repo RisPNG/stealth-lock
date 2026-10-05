@@ -32,6 +32,7 @@ async function runtime({stealth = false, attached = true} = {}) {
             this.preedit = '';
             this.destroyed = false;
             this.clutter_text = {
+                set_max_length: length => { this.maximumCharacters = length; },
                 connectObject: (...arguments_) => {
                     assert.equal(arguments_.at(-1), this);
                     for (let i = 0; i < arguments_.length - 1; i += 2)
@@ -80,6 +81,7 @@ async function runtime({stealth = false, attached = true} = {}) {
 
 test('constructs a native password entry with separate stealth and normal presentation', async () => {
     const normal = await runtime();
+    assert.equal(normal.actor.maximumCharacters, 512);
     assert.equal(normal.actor.properties.show_peek_icon, true);
     assert.equal(normal.actor.properties.x_expand, true);
     assert.equal(normal.actor.properties.can_focus, true);

@@ -1,0 +1,8 @@
+{
+    "name": "Harness Helper",
+    "description": "Test-only helper for the private headless GNOME Shell harness in tests/shell. Never ship it.",
+    "uuid": "harness-helper@test",
+    "shell-version": ["45", "46", "47", "48", "49", "50"],
+    "session-modes": ["user", "unlock-dialog"],
+    "version": 1
+}

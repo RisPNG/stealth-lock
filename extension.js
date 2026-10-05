@@ -5,14 +5,17 @@ import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 import {Extension} from 'resource:///org/gnome/shell/extensions/extension.js';
 
 import {LockSession, LOCKED_STATE} from './lockSession.js';
-import {watchSystemLock} from './shell.js';
+import {initializeEffectPresets} from './presets.js';
+import {restoreWhenShellReady, watchSystemLock} from './shell.js';
 
 export default class StealthLockExtension extends Extension {
     enable() {
         this._cleanup = [];
         this._session = null;
+        this._abortAction = Meta.KeyBindingAction.NONE;
         this._settings = this.getSettings();
         try {
+            initializeEffectPresets(this._settings);
             if (this._settings.get_user_value('cursor-mode') === null && this._settings.get_user_value('lock-cursor') !== null)
                 this._settings.set_string('cursor-mode', this._settings.get_boolean('lock-cursor') ? 'lock-icon' : 'normal');
             this._lockAction = Main.wm.addKeybinding('lock-hotkey', this._settings, Meta.KeyBindingFlags.NONE,
@@ -36,10 +39,18 @@ export default class StealthLockExtension extends Extension {
                 this
             );
             this._cleanup.push(() => this._settings.disconnectObject(this));
-            this._cleanup.push(() => Main.wm.removeKeybinding('debug-abort-hotkey'));
+            this._cleanup.push(() => {
+                if (this._abortAction !== Meta.KeyBindingAction.NONE)
+                    Main.wm.removeKeybinding('debug-abort-hotkey');
+                this._abortAction = Meta.KeyBindingAction.NONE;
+            });
             this.configureAbortShortcut();
-            if (global.get_runtime_state('b', LOCKED_STATE)?.deep_unpack())
-                this.lock();
+            if (global.get_runtime_state('b', LOCKED_STATE)?.deep_unpack()) {
+                this._cleanup.push(restoreWhenShellReady(() => {
+                    if (global.get_runtime_state('b', LOCKED_STATE)?.deep_unpack())
+                        this.lock();
+                }, this));
+            }
         } catch (error) {
             this.disable();
             throw error;
@@ -75,7 +86,8 @@ export default class StealthLockExtension extends Extension {
     }
 
     configureAbortShortcut() {
-        Main.wm.removeKeybinding('debug-abort-hotkey');
+        if (this._abortAction !== Meta.KeyBindingAction.NONE)
+            Main.wm.removeKeybinding('debug-abort-hotkey');
         this._abortAction = Meta.KeyBindingAction.NONE;
         if (!this._settings.get_boolean('debug-mode'))
             return;

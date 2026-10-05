@@ -1,11 +1,14 @@
 {
     "name": "stealth-lock",
+    "version": "1.0.1",
     "private": true,
     "type": "module",
     "license": "GPL-3.0-only",
     "scripts": {
         "lint": "eslint .",
         "test": "node --test tests/unit/*.test.js",
+        "test:auth": "gjs -m tests/authentication-gjs.js",
+        "test:stylesheets": "bash scripts/check-stylesheets.sh",
         "test:shell": "bash tests/shell/run.sh",
         "check": "bash scripts/check.sh",
         "package": "bash package.sh"

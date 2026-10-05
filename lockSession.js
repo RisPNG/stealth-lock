@@ -3,10 +3,11 @@ import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
 import Meta from 'gi://Meta';
 import Shell from 'gi://Shell';
+import St from 'gi://St';
 
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 
-import {Authentication} from './authentication.js';
+import {Authentication, MAX_PASSWORD_BYTES} from './authentication.js';
 import {PasswordInput} from './input.js';
 import {LockOverlay} from './overlay.js';
 import {captureScreenshot} from './screenshot.js';
@@ -46,7 +47,7 @@ export class LockSession {
             });
             const input = this._input;
             this._cleanup.push({release: () => input.destroy()});
-            this._overlay = new LockOverlay(this._settings, input);
+            this._overlay = new LockOverlay(this._settings, input, this.cancellable);
             const overlay = this._overlay;
             this._cleanup.push({release: () => overlay.destroy()});
             overlay.actor.opacity = 0;
@@ -66,6 +67,18 @@ export class LockSession {
             this._settings.connectObject(
                 'changed::normal-prompt-css', () => overlay.refreshStyle(),
                 'changed::normal-background-css', () => overlay.refreshStyle(),
+                'changed::visual-effect-active', () => {
+                    if (this._ready)
+                        overlay.refreshEffect();
+                },
+                'changed::visual-effect-presets', () => {
+                    if (this._ready)
+                        overlay.refreshEffect();
+                },
+                'changed::normal-prompt-monitor', () => {
+                    if (this._ready)
+                        overlay.refreshEffect();
+                },
                 overlay.actor
             );
             this._cleanup.push({release: () => this._settings.disconnectObject(overlay.actor)});
@@ -102,6 +115,7 @@ export class LockSession {
                         tracker.set_pointer_visible(visible);
                 }});
             }
+            overlay.refreshEffect();
             this._ready = true;
             overlay.actor.opacity = 255;
             overlay.info.text = 'Stealth Lock privacy screen\nPassword required\nCtrl+Alt+Shift+L: GNOME lock';
@@ -114,7 +128,7 @@ export class LockSession {
                 if (this._grabbed) {
                     this._ready = true;
                     this._overlay.actor.opacity = 255;
-                    this._overlay.info.text = 'Setup incomplete; password or Ctrl+Alt+Shift+L required';
+                    this._overlay.setStatus('Setup incomplete; password or Ctrl+Alt+Shift+L required');
                     this._input.actor.grab_key_focus();
                 } else {
                     this.close({clearState: false});
@@ -167,7 +181,8 @@ export class LockSession {
                 return Clutter.EVENT_STOP;
             this.resetPasswordTimeout(true);
             if (control && !alt && (key === Clutter.KEY_r || key === Clutter.KEY_R) && this._overlay.prompt.visible) {
-                this._input.actor.password_visible = !this._input.actor.password_visible;
+                if (!St.Settings.get().disable_show_password)
+                    this._input.actor.password_visible = !this._input.actor.password_visible;
                 return Clutter.EVENT_STOP;
             }
             if (control && !alt && (key === Clutter.KEY_u || key === Clutter.KEY_U)) {
@@ -229,20 +244,31 @@ export class LockSession {
         let password = this._input.takePassword();
         if (!password)
             return;
-        this._overlay.info.text = 'Checking password';
+        if (new TextEncoder().encode(password).length > MAX_PASSWORD_BYTES) {
+            this._overlay.setStatus(`Password exceeds ${MAX_PASSWORD_BYTES} UTF-8 bytes; use GNOME lock`);
+            return;
+        }
+        const retrySeconds = Math.ceil((this._authentication.retryUntil - GLib.get_monotonic_time() / 1000) / 1000);
+        if (retrySeconds > 0) {
+            this._overlay.setStatus(`Wait ${retrySeconds} seconds before retrying`);
+            return;
+        }
+        this._overlay.setStatus('Checking password');
         try {
             const verification = this._authentication.verify(password);
             password = null;
-            const success = await verification;
+            const outcome = await verification;
             this.cancellable.set_error_if_cancelled();
-            if (success)
+            if (outcome === 'granted')
                 this.close();
+            else if (outcome === 'denied')
+                this._overlay.setStatus('Password not accepted; wait before retrying');
             else
-                this._overlay.info.text = 'Authentication failed; wait before retrying';
+                this._overlay.setStatus('Authentication unavailable; Ctrl+Alt+Shift+L opens GNOME lock');
         } catch (error) {
             if (!this.cancellable.is_cancelled()) {
                 console.error(`Stealth Lock: authentication failed: ${error.message}`);
-                this._overlay.info.text = 'Authentication unavailable; Ctrl+Alt+Shift+L opens GNOME lock';
+                this._overlay.setStatus('Authentication unavailable; Ctrl+Alt+Shift+L opens GNOME lock');
             }
         }
     }
@@ -256,12 +282,12 @@ export class LockSession {
             if (locked)
                 this.nativeLockActivated();
             else if (this._overlay)
-                this._overlay.info.text = 'GNOME could not lock; privacy screen remains active';
+                this._overlay.setStatus('GNOME could not lock; privacy screen remains active');
             return locked;
         } catch (error) {
             console.error(`Stealth Lock: GNOME lock failed: ${error.message}`);
             if (this._overlay)
-                this._overlay.info.text = 'GNOME could not lock; privacy screen remains active';
+                this._overlay.setStatus('GNOME could not lock; privacy screen remains active');
             return false;
         } finally {
             this._handoff = false;
@@ -323,6 +349,7 @@ export class LockSession {
                     });
             });
             this.cancellable.set_error_if_cancelled();
+            const owners = new Set();
             await Promise.all(names.filter(name => name.startsWith('org.mpris.MediaPlayer2.')).map(async name => {
                 let restoration = null;
                 try {
@@ -338,6 +365,9 @@ export class LockSession {
                             });
                     });
                     this.cancellable.set_error_if_cancelled();
+                    if (owners.has(owner))
+                        return;
+                    owners.add(owner);
                     const status = await new Promise((resolve, reject) => {
                         bus.call(owner, MPRIS_PATH, 'org.freedesktop.DBus.Properties', 'Get',
                             new GLib.Variant('(ss)', [MPRIS_PLAYER, 'PlaybackStatus']), new GLib.VariantType('(v)'),
@@ -354,7 +384,13 @@ export class LockSession {
                         return;
                     restoration = {media: true, release: () => {
                         bus.call(owner, MPRIS_PATH, MPRIS_PLAYER, 'Play', null, null,
-                            Gio.DBusCallFlags.NO_AUTO_START, 2000, null, null);
+                            Gio.DBusCallFlags.NO_AUTO_START, 2000, null, (connection, result) => {
+                                try {
+                                    connection.call_finish(result);
+                                } catch (error) {
+                                    console.warn(`Stealth Lock: media resume failed for ${owner}: ${error.message}`);
+                                }
+                            });
                     }};
                     this._cleanup.push(restoration);
                     await new Promise((resolve, reject) => {

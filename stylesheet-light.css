@@ -1,0 +1,15 @@
+@import url("stylesheet-base.css");
+
+.stealth-lock-prompt {
+    background-color: #ffffff;
+    border-color: #c0c0c0;
+}
+
+.stealth-lock-password-entry,
+.stealth-lock-status {
+    color: #333333;
+}
+
+.stealth-lock-password-entry .peek-password {
+    color: #757575;
+}

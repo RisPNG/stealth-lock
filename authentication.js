@@ -4,6 +4,7 @@ import GLib from 'gi://GLib';
 const AUTH_TIMEOUT_MS = 10000;
 const RETRY_BASE_MS = 1000;
 const RETRY_LIMIT_MS = 30000;
+export const MAX_PASSWORD_BYTES = 512;
 
 export class Authentication {
     constructor(path, cancellable) {
@@ -17,15 +18,16 @@ export class Authentication {
     async verify(password) {
         if (this.busy || this._cancellable.is_cancelled() ||
             GLib.get_monotonic_time() / 1000 < this.retryUntil ||
-            typeof password !== 'string' || !password || /[\n\r\0]/u.test(password))
-            return false;
+            typeof password !== 'string' || !password || /[\n\r\0\uD800-\uDFFF]/u.test(password) ||
+            new TextEncoder().encode(password).length > MAX_PASSWORD_BYTES)
+            return 'error';
 
         this.busy = true;
         let process = null;
         let timeoutId = 0;
         let cancelledId = 0;
         let timedOut = false;
-        let success = false;
+        let outcome = 'error';
 
         try {
             process = Gio.Subprocess.new(
@@ -38,7 +40,7 @@ export class Authentication {
 
             if (this._cancellable.is_cancelled()) {
                 process.force_exit();
-                return false;
+                return 'error';
             }
 
             timeoutId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, AUTH_TIMEOUT_MS, () => {
@@ -59,11 +61,25 @@ export class Authentication {
                 });
             });
             if (this._cancellable.is_cancelled())
-                return false;
+                return 'error';
 
-            success = communicated && !timedOut && process.get_successful();
+            if (timedOut) {
+                console.warn('Stealth Lock: authentication helper timed out');
+            } else if (communicated && process.get_if_exited()) {
+                const status = process.get_exit_status();
+                if (status === 0)
+                    outcome = 'granted';
+                else if (status === 1)
+                    outcome = 'denied';
+                else
+                    console.warn(`Stealth Lock: authentication helper failed (exit ${status})`);
+            } else {
+                console.warn('Stealth Lock: authentication helper did not complete normally');
+            }
         } catch {
             process?.force_exit();
+            if (!this._cancellable.is_cancelled())
+                console.warn('Stealth Lock: authentication transport unavailable');
         } finally {
             if (timeoutId)
                 GLib.source_remove(timeoutId);
@@ -72,7 +88,7 @@ export class Authentication {
             this.busy = false;
         }
 
-        if (success) {
+        if (outcome === 'granted') {
             this._failures = 0;
             this.retryUntil = 0;
         } else if (!this._cancellable.is_cancelled()) {
@@ -81,6 +97,6 @@ export class Authentication {
                 Math.min(RETRY_BASE_MS * 2 ** (this._failures - 1), RETRY_LIMIT_MS);
         }
 
-        return success;
+        return outcome;
     }
 }

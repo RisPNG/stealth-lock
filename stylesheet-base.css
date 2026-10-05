@@ -1,0 +1,74 @@
+#stealthLockOverlay {
+    background-color: transparent;
+}
+
+.stealth-lock-prompt {
+    border-width: 1px;
+    border-radius: 6px;
+    padding: 8px 14px;
+}
+
+.stealth-lock-password-entry {
+    font-size: 22px;
+    width: 260px;
+}
+
+.stealth-lock-password-entry .peek-password {
+    icon-size: 20px;
+}
+
+.stealth-lock-status {
+    width: 260px;
+    padding-top: 6px;
+    font-size: 12px;
+}
+
+.stealth-lock-hidden-input {
+    padding: 0;
+    margin: 0;
+    border: none;
+    background-color: transparent;
+    color: transparent;
+}
+
+.stealth-lock-info {
+    color: #ffffff;
+    background-color: rgba(0, 0, 0, 0.7);
+    padding: 8px;
+    border-radius: 6px;
+    font-family: monospace;
+    font-size: 12px;
+}
+
+.stealth-lock-effect-blur {
+    background-color: transparent;
+}
+
+.stealth-lock-effect-neo-rain,
+.stealth-lock-effect-city-grow {
+    -stealth-lock-background: #000000;
+    -stealth-lock-foreground: #00ff46;
+    -stealth-lock-head: #b3ffb3;
+    -stealth-lock-glitch: #99ff99;
+    -stealth-lock-cyan: #33f2ff;
+    -stealth-lock-mint: #4dffb8;
+    -stealth-lock-amber: #f2c74d;
+    -stealth-lock-orange: #ff753d;
+    -stealth-lock-magenta: #e666bf;
+}
+
+.stealth-lock-effect-clock {
+    color: #ffffff;
+    spacing: 6px;
+}
+
+.stealth-lock-effect-time {
+    font-weight: 700;
+    text-align: center;
+}
+
+.stealth-lock-effect-date {
+    color: rgba(255, 255, 255, 0.7);
+    font-weight: 500;
+    text-align: center;
+}

@@ -29,7 +29,7 @@ async function runtime() {
         'gi://Clutter': {default: {}},
         'gi://Gio': {default: {Cancellable, DBus: {session: bus}, DBusCallFlags: flags}},
         'gi://GLib': {default: {Variant, VariantType: class { constructor(type) { this.type = type; } }}},
-        'gi://Meta': {default: {}}, 'gi://Shell': {default: {}},
+        'gi://Meta': {default: {}}, 'gi://Shell': {default: {}}, 'gi://St': {default: {}},
         'resource:///org/gnome/shell/ui/main.js': {},
         './authentication.js': {Authentication: class {}},
         './input.js': {PasswordInput: class {}}, './overlay.js': {LockOverlay: class {}},
@@ -85,7 +85,9 @@ test('pauses only MPRIS players and restores the same unique owner without activ
     assert.equal(play.iface, 'org.mpris.MediaPlayer2.Player');
     assert.equal(play.flags, state.flags.NO_AUTO_START);
     assert.equal(play.cancellable, null);
-    assert.equal(play.callback, null);
+    assert.equal(typeof play.callback, 'function');
+    await reply(play, []);
+    assert.equal(state.warnings.length, 0);
     assert.equal(state.session._cleanup.length, 0);
     state.session.close();
     assert.equal(state.calls.filter(call => call.method === 'Play').length, 1);
@@ -202,4 +204,40 @@ test('a failing player does not prevent other players being paused and restored'
     assert.equal(plays.length, 1);
     assert.equal(plays[0].destination, ':1.88');
     assert.equal(state.warnings.length, 1);
+});
+
+test('MPRIS aliases sharing one unique owner pause and restore the player exactly once', async () => {
+    const state = await runtime();
+    const task = state.session.pauseMedia();
+    await reply(state.calls.at(-1), [['org.mpris.MediaPlayer2.primary', 'org.mpris.MediaPlayer2.alias']]);
+    const owners = state.calls.filter(call => call.method === 'GetNameOwner');
+    await reply(owners[0], [':1.55']);
+    await reply(owners[1], [':1.55']);
+    const status = state.calls.filter(call => call.method === 'Get');
+    assert.equal(status.length, 1);
+    await reply(status[0], [new state.Variant('s', 'Playing')]);
+    const pauses = state.calls.filter(call => call.method === 'Pause');
+    assert.equal(pauses.length, 1);
+    await reply(pauses[0], []);
+    await task;
+    state.session.close();
+    const plays = state.calls.filter(call => call.method === 'Play');
+    assert.equal(plays.length, 1);
+    assert.equal(plays[0].destination, ':1.55');
+    await reply(plays[0], []);
+    assert.equal(state.warnings.length, 0);
+});
+
+test('failed resume reports the original unique owner without reactivating or retrying the player', async () => {
+    const state = await runtime();
+    const {task, pause} = await playingPlayer(state);
+    await reply(pause, []);
+    await task;
+    state.session.close();
+    await reply(state.calls.at(-1), undefined, new Error('owner vanished'));
+    assert.equal(state.warnings.length, 1);
+    assert.match(state.warnings[0], /media resume failed for :1.44: owner vanished/);
+    assert.equal(state.session._cleanup.length, 0);
+    assert.equal(state.closed(), 1);
+    assert.equal(state.calls.filter(call => call.method === 'Play').length, 1);
 });

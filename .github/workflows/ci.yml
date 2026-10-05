@@ -20,7 +20,7 @@ jobs:
       - name: Install development dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install --yes gjs libglib2.0-bin zip unzip meson ninja-build
+          sudo apt-get install --yes --no-install-recommends gjs gnome-shell libglib2.0-bin zip unzip meson ninja-build
           mise use --global node@20.19.2 python@3.12.11
           mise exec -- npm ci
           mise exec -- python3 -m pip install reuse==5.1.1

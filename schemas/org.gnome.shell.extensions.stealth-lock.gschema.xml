@@ -1,5 +1,20 @@
 <?xml version='1.0' encoding='UTF-8'?>
 <schemalist>
+  <enum id="org.gnome.shell.extensions.stealth-lock.LockType">
+    <value nick="stealth" value="0" />
+    <value nick="normal" value="1" />
+  </enum>
+  <enum id="org.gnome.shell.extensions.stealth-lock.CursorMode">
+    <value nick="lock-icon" value="0" />
+    <value nick="normal" value="1" />
+    <value nick="hidden" value="2" />
+  </enum>
+  <enum id="org.gnome.shell.extensions.stealth-lock.CursorAnchor">
+    <value nick="br" value="0" />
+    <value nick="tr" value="1" />
+    <value nick="tl" value="2" />
+    <value nick="bl" value="3" />
+  </enum>
   <schema id="org.gnome.shell.extensions.stealth-lock" path="/org/gnome/shell/extensions/stealth-lock/">
     <key name="lock-hotkey" type="as">
       <default>['&lt;Super&gt;&lt;Control&gt;l']</default>
@@ -29,7 +44,7 @@
       <summary>Pause Media</summary>
       <description>Pause playing MPRIS players and resume the same player instances when the privacy screen ends. During a handoff they remain paused until GNOME unlocks.</description>
     </key>
-    <key name="cursor-mode" type="s">
+    <key name="cursor-mode" enum="org.gnome.shell.extensions.stealth-lock.CursorMode">
       <default>'lock-icon'</default>
       <summary>Cursor Mode</summary>
       <description>
@@ -37,11 +52,6 @@
         Valid values: "lock-icon" (show custom lock cursor), "normal" (leave system cursor),
         "hidden" (hide cursor completely).
       </description>
-      <choices>
-        <choice value="lock-icon" />
-        <choice value="normal" />
-        <choice value="hidden" />
-      </choices>
     </key>
     <key name="lock-cursor" type="b">
       <default>true</default>
@@ -81,17 +91,13 @@
       </description>
       <range min="0" max="3600" />
     </key>
-    <key name="lock-type" type="s">
+    <key name="lock-type" enum="org.gnome.shell.extensions.stealth-lock.LockType">
       <default>'stealth'</default>
       <summary>Lock Type</summary>
       <description>
         Controls how password entry behaves while locked.
         "stealth" shows no UI, while "normal" shows an on-screen password prompt.
       </description>
-      <choices>
-        <choice value="stealth" />
-        <choice value="normal" />
-      </choices>
     </key>
     <key name="normal-prompt-follow-cursor" type="b">
       <default>false</default>
@@ -100,21 +106,16 @@
         When enabled (Normal lock type), the password prompt follows the cursor.
       </description>
     </key>
-    <key name="normal-prompt-cursor-anchor" type="s">
+    <key name="normal-prompt-cursor-anchor" enum="org.gnome.shell.extensions.stealth-lock.CursorAnchor">
       <default>'br'</default>
       <summary>Cursor Anchor</summary>
       <description>
         Where to place the prompt relative to the cursor when following it:
         "br" bottom-right, "tr" top-right, "tl" top-left, "bl" bottom-left.
       </description>
-      <choices>
-        <choice value="br" />
-        <choice value="tr" />
-        <choice value="tl" />
-        <choice value="bl" />
-      </choices>
     </key>
     <key name="normal-prompt-offset-x" type="i">
+      <range min="-2147483648" max="2147483647" />
       <default>12</default>
       <summary>Cursor Offset X</summary>
       <description>
@@ -122,6 +123,7 @@
       </description>
     </key>
     <key name="normal-prompt-offset-y" type="i">
+      <range min="-2147483648" max="2147483647" />
       <default>12</default>
       <summary>Cursor Offset Y</summary>
       <description>
@@ -138,6 +140,7 @@
       </description>
     </key>
     <key name="normal-prompt-fixed-x" type="i">
+      <range min="-2147483648" max="2147483647" />
       <default>-1</default>
       <summary>Fixed X</summary>
       <description>
@@ -146,6 +149,7 @@
       </description>
     </key>
     <key name="normal-prompt-fixed-y" type="i">
+      <range min="-2147483648" max="2147483647" />
       <default>-1</default>
       <summary>Fixed Y</summary>
       <description>
@@ -182,6 +186,21 @@
         JSON array of saved Custom CSS entries for the Normal background editor.
         Each entry stores a name and code snippet.
       </description>
+    </key>
+    <key name="visual-effect-presets" type="s">
+      <default>'[]'</default>
+      <summary>Saved Visual Effects</summary>
+      <description>JSON array of ordinary saved effect entries, each containing a name and JSON configuration in code. Starter entries are created once for fresh installations and can be edited or removed.</description>
+    </key>
+    <key name="visual-effect-active" type="s">
+      <default>''</default>
+      <summary>Active Visual Effect</summary>
+      <description>Name of the selected saved visual effect. Empty means no effect. Visual effects never control password input or authentication.</description>
+    </key>
+    <key name="visual-effect-initialized" type="b">
+      <default>false</default>
+      <summary>Visual Effects Initialized</summary>
+      <description>Records first-install library initialization so edited or deleted starter entries are never restored during updates.</description>
     </key>
     <key name="normal-prompt-custom-js" type="s">
       <default>''</default>

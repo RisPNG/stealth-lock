@@ -9,6 +9,7 @@ async function runtime({capture, verification, handoff = false, grabbed = true, 
     const chrome = new Set();
     const sources = new Map();
     const state = new Map();
+    const lockdown = {disable_show_password: false};
     let nextSource = 1;
     const values = {
         'lock-type': 'stealth', 'pause-media': pause, 'freeze-display': freeze,
@@ -76,6 +77,8 @@ async function runtime({capture, verification, handoff = false, grabbed = true, 
             this.prompt = {visible: false};
         }
         refreshStyle() {}
+        refreshEffect() {}
+        setStatus(message) { this.info.text = message; }
         positionPrompt() {}
         movePointer() {}
         destroy() {
@@ -85,11 +88,11 @@ async function runtime({capture, verification, handoff = false, grabbed = true, 
         }
     }
     class Auth {
-        constructor() { this.busy = false; }
+        constructor() { this.busy = false; this.retryUntil = 0; }
         async verify(password) {
             this.busy = true;
             events.push(['verify', password]);
-            const result = verification ? await verification.promise : false;
+            const result = verification ? await verification.promise : 'denied';
             this.busy = false;
             return result;
         }
@@ -113,8 +116,9 @@ async function runtime({capture, verification, handoff = false, grabbed = true, 
         'gi://Clutter': {default: Clutter}, 'gi://Gio': {default: {Cancellable}},
         'gi://GLib': {default: GLib}, 'gi://Meta': {default: {KeyBindingAction: {NONE: 0}}},
         'gi://Shell': {default: {ActionMode: {NONE: 0}}},
+        'gi://St': {default: {Settings: {get: () => lockdown}}},
         'resource:///org/gnome/shell/ui/main.js': Main,
-        './authentication.js': {Authentication: Auth}, './input.js': {PasswordInput: Input},
+        './authentication.js': {Authentication: Auth, MAX_PASSWORD_BYTES: 512}, './input.js': {PasswordInput: Input},
         './overlay.js': {LockOverlay: Overlay},
         './screenshot.js': {captureScreenshot: async cancellable => {
             events.push('capture');
@@ -126,9 +130,9 @@ async function runtime({capture, verification, handoff = false, grabbed = true, 
             events.push('native-lock-request');
             return handoff;
         }},
-    }, {global, console: {error: message => events.push(message), warn: message => events.push(message)}});
+    }, {global, TextEncoder, console: {error: message => events.push(message), warn: message => events.push(message)}});
     const session = new module.LockSession({path: '/extension', getSettings: () => settings}, () => events.push('closed'));
-    return {session, events, signals, sources, state, settings, values, Clutter, chrome, key: (key, state = 0) => ({
+    return {session, events, signals, sources, state, settings, values, Clutter, chrome, lockdown, key: (key, state = 0) => ({
         type: () => Clutter.EventType.KEY_PRESS, get_key_symbol: () => key, get_state: () => state,
         get_key_code: () => 1, get_key_unicode: () => key,
     })};
@@ -156,7 +160,7 @@ test('a stale successful authentication cannot end a closed or replacement sessi
     const attempt = session.authenticate();
     assert.equal(session._input.actor.text, '');
     session.close({clearState: false});
-    verification.resolve(true);
+    verification.resolve('granted');
     await attempt;
     assert.equal(events.filter(event => event === 'closed').length, 1);
     assert.equal(state.get('stealth-lock@user.locked'), true);
@@ -168,13 +172,75 @@ test('successful unlock clears the recovery marker and releases resources in rev
     await session.start();
     session._input.actor.text = 'correct';
     const attempt = session.authenticate();
-    verification.resolve(true);
+    verification.resolve('granted');
     await attempt;
     assert.equal(state.has('stealth-lock@user.locked'), false);
     assert.ok(events.indexOf('ungrab') < events.indexOf('overlay-destroy'));
     assert.equal(chrome.size, 0);
     assert.equal(events.filter(event => event === 'chrome-remove').length, 1);
     assert.ok(events.indexOf('overlay-destroy') < events.indexOf('input-destroy'));
+});
+
+test('denied and unavailable authentication retain the modal with distinct feedback', async t => {
+    for (const outcome of ['denied', 'error', true]) {
+        await t.test(String(outcome), async () => {
+            const verification = deferred();
+            const {session, events, state} = await runtime({verification});
+            await session.start();
+            session._input.actor.text = 'secret';
+            const attempt = session.authenticate();
+            verification.resolve(outcome);
+            await attempt;
+            assert.equal(state.get('stealth-lock@user.locked'), true);
+            assert.equal(events.includes('ungrab'), false);
+            assert.match(session._overlay.info.text, outcome === 'denied' ? /Password not accepted/ : /Authentication unavailable/);
+            session.close();
+        });
+    }
+});
+
+test('oversized Unicode input is cleared and rejected with byte-limit feedback before authentication', async () => {
+    const {session, events} = await runtime();
+    await session.start();
+    session._input.actor.text = '🔐'.repeat(129);
+    session._input.actor.password_visible = true;
+    await session.authenticate();
+    assert.equal(session._input.actor.text, '');
+    assert.equal(session._input.actor.password_visible, false);
+    assert.match(session._overlay.info.text, /512 UTF-8 bytes/);
+    assert.equal(events.some(event => Array.isArray(event) && event[0] === 'verify'), false);
+    assert.equal(events.includes('ungrab'), false);
+    session.close();
+});
+
+test('Ctrl+R respects live GNOME reveal policy and remains blocked in stealth mode', async () => {
+    const {session, lockdown, key, Clutter} = await runtime();
+    await session.start();
+    const reveal = key(Clutter.KEY_r, Clutter.ModifierType.CONTROL_MASK);
+    session._overlay.prompt.visible = true;
+    assert.equal(session.handleEvent(reveal), Clutter.EVENT_STOP);
+    assert.equal(session._input.actor.password_visible, true);
+    session._input.actor.password_visible = false;
+    lockdown.disable_show_password = true;
+    assert.equal(session.handleEvent(reveal), Clutter.EVENT_STOP);
+    assert.equal(session._input.actor.password_visible, false);
+    lockdown.disable_show_password = false;
+    session._overlay.prompt.visible = false;
+    assert.equal(session.handleEvent(reveal), Clutter.EVENT_STOP);
+    assert.equal(session._input.actor.password_visible, false);
+    session.close();
+});
+
+test('cooldown submission clears the entry and reports retry time without starting authentication', async () => {
+    const {session, events} = await runtime();
+    await session.start();
+    session._authentication.retryUntil = 12000;
+    session._input.actor.text = 'secret';
+    await session.authenticate();
+    assert.equal(session._input.actor.text, '');
+    assert.equal(session._overlay.info.text, 'Wait 2 seconds before retrying');
+    assert.equal(events.some(event => Array.isArray(event) && event[0] === 'verify'), false);
+    session.close();
 });
 
 test('cleanup continues after an individual teardown fails', async () => {

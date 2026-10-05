@@ -34,14 +34,15 @@ payload=(
     shell.js
     input.js
     prefs.js
+    presets.js
+    effects.js
+    city.js
     metadata.json
     stylesheet.css
     schemas/org.gnome.shell.extensions.stealth-lock.gschema.xml
-    package.sh
-    install.sh
-    uninstall.sh
-    README.md
-    REVIEW.md
+    stylesheet-base.css
+    stylesheet-dark.css
+    stylesheet-light.css
     LICENSE
     REUSE.toml
     LICENSES/GPL-3.0-only.txt
@@ -50,9 +51,28 @@ payload=(
 for file in "${payload[@]}"; do
     mkdir -p "$staging/payload/$(dirname "$file")"
     cp "$script_dir/$file" "$staging/payload/$file"
+    chmod 0644 "$staging/payload/$file"
 done
 
-glib-compile-schemas --strict "$staging/payload/schemas"
-(cd "$staging/payload" && zip -q -r "$staging/extension.zip" .)
-mv "$staging/extension.zip" "$output"
+glib-compile-schemas --strict --dry-run "$staging/payload/schemas"
+gnome-extensions pack --force --out-dir="$staging" \
+    --extra-source=lockSession.js --extra-source=authentication.js --extra-source=authentication.py \
+    --extra-source=screenshot.js --extra-source=overlay.js --extra-source=shell.js --extra-source=input.js \
+    --extra-source=presets.js --extra-source=effects.js --extra-source=city.js \
+    --extra-source=stylesheet-base.css --extra-source=stylesheet-dark.css --extra-source=stylesheet-light.css \
+    --extra-source=LICENSE --extra-source=REUSE.toml --extra-source=LICENSES \
+    "$staging/payload"
+/usr/bin/python3 - "$staging/$extension_uuid.shell-extension.zip" "${payload[@]}" <<'PY'
+import stat
+import sys
+import zipfile
+
+with zipfile.ZipFile(sys.argv[1]) as archive:
+    entries = [entry for entry in archive.infolist() if not entry.is_dir()]
+    if sorted(entry.filename for entry in entries) != sorted(sys.argv[2:]):
+        raise SystemExit("Unexpected extension archive inventory")
+    if any((entry.external_attr >> 16) & (stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH) for entry in entries):
+        raise SystemExit("Extension payload contains executable files")
+PY
+mv "$staging/$extension_uuid.shell-extension.zip" "$output"
 echo "$output"

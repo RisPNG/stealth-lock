@@ -11,6 +11,7 @@ export class PasswordInput {
             show_peek_icon: !stealth,
             x_expand: !stealth,
         });
+        this.actor.clutter_text.set_max_length(512);
 
         if (stealth) {
             this.actor.set_size(1, 1);

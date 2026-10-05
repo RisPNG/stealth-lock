@@ -15,6 +15,8 @@ PAM_PROMPT_ECHO_ON = 2
 PAM_ERROR_MSG = 3
 PAM_TEXT_INFO = 4
 PAM_MAX_NUM_MSG = 32
+PAM_MAX_RESP_SIZE = 512
+PAM_DENIED = frozenset((6, 7, 11, 12, 13, 27))
 
 
 class PamMessage(ctypes.Structure):
@@ -42,7 +44,14 @@ def verify_password(password):
     if not isinstance(password, str) or not password or any(
         character in password for character in ("\n", "\r", "\0")
     ):
-        return False
+        return "error"
+
+    try:
+        encoded_password = password.encode("utf-8")
+    except UnicodeError:
+        return "error"
+    if len(encoded_password) > PAM_MAX_RESP_SIZE:
+        return "error"
 
     password_buffer = None
     handle = ctypes.c_void_p()
@@ -64,7 +73,7 @@ def verify_password(password):
         libc.free.argtypes = [ctypes.c_void_p]
         libc.free.restype = None
 
-        password_buffer = ctypes.create_string_buffer(password.encode("utf-8"))
+        password_buffer = ctypes.create_string_buffer(encoded_password)
 
         def conversation(count, messages, response, _data):
             nonlocal conversation_failed, password_prompts
@@ -104,7 +113,7 @@ def verify_password(password):
 
                 response[0] = responses
                 return PAM_SUCCESS
-            except Exception:
+            except BaseException:
                 conversation_failed = True
                 if responses is not None:
                     for index in range(count):
@@ -148,12 +157,20 @@ def verify_password(password):
         if password_buffer is not None:
             ctypes.memset(password_buffer, 0, ctypes.sizeof(password_buffer))
 
-    return authenticated and ended and not conversation_failed
+    if not ended or conversation_failed:
+        return "error"
+    if authenticated:
+        return "granted"
+    return "denied" if status in PAM_DENIED else "error"
 
 
 if __name__ == "__main__":
     try:
-        password = sys.stdin.buffer.read().decode("utf-8")
-        sys.exit(0 if verify_password(password) else 1)
+        payload = sys.stdin.buffer.read(PAM_MAX_RESP_SIZE + 1)
+        if len(payload) > PAM_MAX_RESP_SIZE:
+            sys.exit(2)
+        password = payload.decode("utf-8")
+        outcome = verify_password(password)
+        sys.exit({"granted": 0, "denied": 1, "error": 2}[outcome])
     except (OSError, UnicodeError):
-        sys.exit(1)
+        sys.exit(2)
