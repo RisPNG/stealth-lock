@@ -72,5 +72,7 @@ docker exec --user 1000 --workdir /project \
             exit 1
         }
         echo "$actual"
+        unshare --user --map-current-user --net -- true
+        echo "Fixture user and network namespace preflight passed"
         mise exec -- bash tests/shell/run.sh
     '

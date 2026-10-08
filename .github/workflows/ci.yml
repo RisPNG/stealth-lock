@@ -102,6 +102,8 @@ jobs:
         with:
           version: 2026.10.4
           install: false
+      - name: Allow isolated user namespaces on the disposable runner
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
       - name: Test actual GNOME Shell runtime
         env:
           SHELL_VERSION: ${{ matrix.shell }}
