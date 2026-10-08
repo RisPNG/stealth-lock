@@ -24,28 +24,15 @@ jobs:
       - uses: jdx/mise-action@c37c93293d6b742fc901e1406b8f764f6fb19dac
         with:
           version: 2026.10.4
-          install: false
+          install: true
       - name: Install development dependencies
         run: |
           sudo apt-get update
           sudo apt-get install --yes --no-install-recommends gjs gnome-shell libglib2.0-bin gir1.2-gtk-4.0 gir1.2-adw-1 libjavascriptcoregtk-6.0-1 gettext bubblewrap openssl gnupg zip unzip python3-venv
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
-          mise use --global node@24.21.0
           mise exec -- npm ci
-          mise exec -- python3 -m venv "$RUNNER_TEMP/check-tools"
-          mise exec -- "$RUNNER_TEMP/check-tools/bin/python" -m pip install reuse==5.1.1 meson==1.3.2 ninja==1.11.1.3
-          echo "$RUNNER_TEMP/check-tools/bin" >> "$GITHUB_PATH"
       - name: Install pinned GNOME GJS checks
-        env:
-          GJS_CI_TOOLS_REVISION: 1f758af5b8b3cfb677fbdbeed51148d39f23e365
-        run: |
-          mkdir "$RUNNER_TEMP/gjs-ci-tools"
-          curl --fail --location "https://gitlab.gnome.org/World/javascript/gjs-ci-tools/-/archive/$GJS_CI_TOOLS_REVISION/gjs-ci-tools-$GJS_CI_TOOLS_REVISION.tar.gz" -o "$RUNNER_TEMP/gjs-ci-tools.tar.gz"
-          echo "670d1d49c0e62c48a5846fc1077f550c453e3b12790dde7ee35c91f4a8861048  $RUNNER_TEMP/gjs-ci-tools.tar.gz" | sha256sum --check
-          tar -xzf "$RUNNER_TEMP/gjs-ci-tools.tar.gz" --strip-components=1 -C "$RUNNER_TEMP/gjs-ci-tools"
-          mise exec -- meson setup "$RUNNER_TEMP/gjs-ci-tools-build" "$RUNNER_TEMP/gjs-ci-tools" --prefix "$RUNNER_TEMP/gjs-ci-tools-install"
-          mise exec -- meson install -C "$RUNNER_TEMP/gjs-ci-tools-build"
-          echo "$RUNNER_TEMP/gjs-ci-tools-install/bin" >> "$GITHUB_PATH"
+        run: mise run setup:gjs
       - name: Check new commit subjects
         env:
           COMMIT_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
@@ -69,7 +56,7 @@ jobs:
         run: mise exec -- npm run check
       - name: Clean development dependencies
         if: always()
-        run: rm -rf node_modules "$RUNNER_TEMP/check-tools" "$RUNNER_TEMP/gjs-ci-tools" "$RUNNER_TEMP/gjs-ci-tools-build" "$RUNNER_TEMP/gjs-ci-tools-install" "$RUNNER_TEMP/gjs-ci-tools.tar.gz"
+        run: rm -rf node_modules dev/.tools
 
   native:
     needs: checks

@@ -1,0 +1,60 @@
+min_version = "2025.8.13"
+
+[tools]
+node = "24.21.0"
+uv = "0.12.5"
+"pipx:meson" = "1.3.2"
+"pipx:ninja" = "1.11.1.3"
+
+[vars]
+gjs_ci_tools_revision = "1f758af5b8b3cfb677fbdbeed51148d39f23e365"
+gjs_ci_tools_sha256 = "670d1d49c0e62c48a5846fc1077f550c453e3b12790dde7ee35c91f4a8861048"
+
+[env]
+_.path = ["{{config_root}}/dev/.tools/gjs-ci-tools/bin"]
+
+[_.system]
+gnome-shell = ">=45, <52"
+gnome-extensions = "from the installed GNOME Shell"
+gjs = ">=1.78"
+gtk4 = ">=4.12"
+libadwaita = ">=1.4"
+glib = ">=2.76, including schema tools and introspection bindings"
+python = "system /usr/bin/python3"
+bubblewrap = ">=0.8.0, at /usr/bin/bwrap"
+javascriptcoregtk = "6.0 ABI, libjavascriptcoregtk-6.0.so.1"
+pam = "system libpam.so.0 and an administrator-configured password service"
+bash = ">=4.3"
+unzip = "distribution package"
+git = "distribution package, for development and source releases"
+zip = "distribution package, for development checks"
+gettext = "distribution package, for translation extraction checks"
+openssl = "distribution package, for isolated PAM tests"
+gnupg = "2.x with Ed25519 support, for signed source releases"
+curl = "distribution package, for downloading GNOME checks"
+tar = "distribution package, for downloading GNOME checks and source releases"
+gzip = "distribution package, for source releases"
+coreutils = "distribution package, including sha256sum"
+dbus = "distribution package, for native session tests"
+ibus = "distribution package with the US engine, for native session tests"
+systemd = "a running user manager, for native session tests"
+util-linux = "distribution package, including unshare for native container tests"
+docker = "distribution package, optional for the native version matrix"
+user-namespaces = "enabled; native fixtures also require network namespaces"
+
+[tasks."setup:gjs"]
+description = "Install the pinned GNOME JavaScript checks"
+env.GJS_CI_TOOLS_PREFIX = "{{config_root}}/dev/.tools/gjs-ci-tools"
+run = '''
+#!/usr/bin/env bash
+set -euo pipefail
+staging=$(mktemp -d)
+trap 'rm -rf "$staging"' EXIT
+revision="{{vars.gjs_ci_tools_revision}}"
+curl --fail --location "https://gitlab.gnome.org/World/javascript/gjs-ci-tools/-/archive/$revision/gjs-ci-tools-$revision.tar.gz" -o "$staging/source.tar.gz"
+echo "{{vars.gjs_ci_tools_sha256}}  $staging/source.tar.gz" | sha256sum --check
+mkdir "$staging/source"
+tar -xzf "$staging/source.tar.gz" --strip-components=1 -C "$staging/source"
+meson setup "$staging/build" "$staging/source" --prefix "$GJS_CI_TOOLS_PREFIX"
+meson install -C "$staging/build"
+'''

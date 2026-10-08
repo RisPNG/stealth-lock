@@ -79,7 +79,8 @@ docker exec --user 1000 --workdir /project \
             exit 1
         }
         echo "$actual"
-        mise use --global node@24.21.0
+        mise trust /project/mise.toml
+        mise install
         unshare --user --map-current-user --net -- bash -eu -c "
             echo Fixture user and network namespace preflight passed
             mise exec -- python3 -I -B -m unittest discover -s tests/visual -p test_visual_renderer.py

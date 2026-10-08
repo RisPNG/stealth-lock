@@ -50,8 +50,6 @@ payload=(
     stylesheet-dark.css
     stylesheet-light.css
     LICENSE
-    REUSE.toml
-    LICENSES/GPL-3.0-only.txt
 )
 
 extras=("--extra-source=$staging/schemas")

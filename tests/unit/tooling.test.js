@@ -22,11 +22,11 @@ function createExtensionFixture(t, {realPresets = false} = {}) {
     for (const path of [source, data, bin, home, config, cache, state, runtime])
         mkdirSync(path, {mode: 0o700});
 
-    for (const file of ['package.sh', 'install.sh', 'uninstall.sh', 'LICENSE', 'REUSE.toml', 'LICENSES/GPL-3.0-only.txt', 'schemas/org.gnome.shell.extensions.stealth-lock.gschema.xml']) {
+    for (const file of ['package.sh', 'install.sh', 'uninstall.sh', 'LICENSE', 'schemas/org.gnome.shell.extensions.stealth-lock.gschema.xml']) {
         mkdirSync(dirname(join(source, file)), {recursive: true});
         copyFileSync(join(project, file), join(source, file));
     }
-    for (const file of ['extension.js', 'shell/lockSession.js', 'shell/authentication.js', 'shell/screenshot.js', 'shell/overlay.js', 'shell/integration.js', 'shell/media.js', 'shell/input.js', 'prefs.js', 'shared/presets.js', 'shared/starter-programs.js', 'shared/visual-api.js', 'shared/visual-frame.js', 'shared/visual-process.js', 'shared/runtime-state.js', 'shell/effects/renderer.js', 'helpers/authentication.py', 'helpers/visual-renderer.py', 'stylesheet.css', 'styles/stylesheet-base.css', 'stylesheet-dark.css', 'stylesheet-light.css', 'README.md', 'REVIEW.md']) {
+    for (const file of ['extension.js', 'shell/lockSession.js', 'shell/authentication.js', 'shell/screenshot.js', 'shell/overlay.js', 'shell/integration.js', 'shell/media.js', 'shell/input.js', 'prefs.js', 'shared/presets.js', 'shared/starter-programs.js', 'shared/visual-api.js', 'shared/visual-frame.js', 'shared/visual-process.js', 'shared/runtime-state.js', 'shell/effects/renderer.js', 'helpers/authentication.py', 'helpers/visual-renderer.py', 'stylesheet.css', 'styles/stylesheet-base.css', 'stylesheet-dark.css', 'stylesheet-light.css', 'README.md']) {
         mkdirSync(dirname(join(source, file)), {recursive: true});
         writeFileSync(join(source, file), '');
     }
@@ -75,7 +75,7 @@ test('native packaging includes exactly the nonexecutable runtime payload withou
     execFileSync('bash', [join(source, 'package.sh'), archive], {env});
     const entries = execFileSync('unzip', ['-Z1', archive], {encoding: 'utf8'}).split('\n').filter(Boolean);
 
-    assert.equal(entries.filter(entry => !entry.endsWith('/')).length, 27);
+    assert.equal(entries.filter(entry => !entry.endsWith('/')).length, 25);
     assert.ok(entries.includes('helpers/authentication.py'));
     assert.ok(entries.includes('shell/input.js'));
     assert.ok(entries.includes('shell/media.js'));
@@ -91,10 +91,10 @@ test('native packaging includes exactly the nonexecutable runtime payload withou
     assert.ok(entries.includes('styles/stylesheet-base.css'));
     assert.ok(entries.includes('schemas/org.gnome.shell.extensions.stealth-lock.gschema.xml'));
     assert.ok(entries.includes('stylesheet-light.css'));
-    assert.ok(entries.includes('LICENSES/GPL-3.0-only.txt'));
+    assert.ok(entries.includes('LICENSE'));
     assert.ok(entries.every(entry => !/(?:private|AGENTS|planning\.md|unlisted|extra\.zip)/.test(entry)));
     assert.equal(existsSync(join(source, 'schemas/gschemas.compiled')), false);
-    assert.ok(entries.every(entry => !/(?:gschemas\.compiled|package\.sh|install\.sh|uninstall\.sh|README|REVIEW)/.test(entry)));
+    assert.ok(entries.every(entry => !/(?:gschemas\.compiled|package\.sh|install\.sh|uninstall\.sh|README)/.test(entry)));
     execFileSync('/usr/bin/python3', ['-c', 'import stat,sys,zipfile; a=zipfile.ZipFile(sys.argv[1]); assert all(not ((e.external_attr >> 16) & (stat.S_IXUSR|stat.S_IXGRP|stat.S_IXOTH)) for e in a.infolist() if not e.is_dir())', archive]);
 
     execFileSync('zip', ['-q', archive, 'AGENTS.md'], {cwd: source});
@@ -126,7 +126,7 @@ pathlib.Path(os.environ["XDG_DATA_HOME"], "pack-details.json").write_text(json.d
     const entries = execFileSync('unzip', ['-Z1', archive], {encoding: 'utf8'}).trim().split('\n');
     assert.ok(entries.includes('schemas/org.gnome.shell.extensions.stealth-lock.gschema.xml'));
     assert.equal(entries.includes('schemas/gschemas.compiled'), false);
-    assert.equal(entries.filter(entry => !entry.endsWith('/')).length, 27);
+    assert.equal(entries.filter(entry => !entry.endsWith('/')).length, 25);
     assert.equal(existsSync(join(source, 'schemas/gschemas.compiled')), false);
     const details = JSON.parse(readFileSync(join(data, 'pack-details.json'), 'utf8'));
     assert.equal(details.automaticSchemasCompiled, false);

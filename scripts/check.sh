@@ -25,4 +25,3 @@ bash scripts/check-stylesheets.sh
 
 bash package.sh "$staging/extension.zip" >/dev/null
 unzip -tq "$staging/extension.zip"
-mise exec -- reuse lint
