@@ -3,7 +3,7 @@ import {createHash} from 'node:crypto';
 import {setImmediate} from 'node:timers/promises';
 import test from 'node:test';
 
-import * as Presets from '../../presets.js';
+import * as Presets from '../../shared/presets.js';
 import {Cancellable, loadModule} from './harness.js';
 
 async function runtime({bitmap = '', size = 40, olderShell = false, lockType = 'normal', monitors = [{x: 0, y: 0, width: 1024, height: 768}]} = {}) {
@@ -31,6 +31,7 @@ async function runtime({bitmap = '', size = 40, olderShell = false, lockType = '
             this.destroyed = false;
             this.visible = true;
             this.clutter_text = {};
+            this.layout_manager = {set_orientation: orientation => { this.orientation = orientation; }};
         }
         add_child(child) { child.parent = this; this.children.push(child); }
         remove_child(child) { this.children.splice(this.children.indexOf(child), 1); child.parent = null; }
@@ -81,8 +82,9 @@ async function runtime({bitmap = '', size = 40, olderShell = false, lockType = '
             set_data: (...arguments_) => uploads.push(arguments_),
         })},
     };
-    const {LockOverlay} = await loadModule('overlay.js', {
-        'gi://Clutter': {default: {Image: olderShell ? class {} : undefined, ContentGravity: {RESIZE_ASPECT: 1}}},
+    const {LockOverlay} = await loadModule('shell/overlay.js', {
+        'gi://Clutter': {default: {Image: olderShell ? class {} : undefined,
+            Orientation: {VERTICAL: 1}, ContentGravity: {RESIZE_ASPECT: 1}}},
         'gi://Cogl': {default: {PixelFormat: {RGBA_8888: 'rgba', RGB_888: 'rgb'}}},
         'gi://GdkPixbuf': {default: GdkPixbuf},
         'gi://Gio': {default: {File: {new_for_commandline_arg: value => {
@@ -105,11 +107,11 @@ async function runtime({bitmap = '', size = 40, olderShell = false, lockType = '
         'gi://Pango': {default: {EllipsizeMode: {NONE: 0}}},
         'gi://St': {default: St},
         'resource:///org/gnome/shell/ui/main.js': {layoutManager: {monitors, primaryMonitor: monitors[0]}},
-        './effects.js': {BackdropEffect: class { constructor() { assert.fail('disabled effects must not create a renderer'); } }},
-        './presets.js': Presets,
+        './effects/backdrop.js': {BackdropEffect: class { constructor() { assert.fail('disabled effects must not create a renderer'); } }},
+        '../shared/presets.js': Presets,
     }, {global: {stage, get_pointer: () => [200, 150]}, console: {debug: message => events.push(message)}});
     const input = {actor: new Actor()};
-    const overlay = new LockOverlay(settings, input, cancellable);
+    const overlay = new LockOverlay(settings, input.actor, cancellable);
     overlay.actor.stage = stage;
     return {overlay, input, cancellable, values, reads, decodes, uploads, stream, events, context};
 }
@@ -126,6 +128,14 @@ test('original bitmap pixels and hotspot survive both native image upload signat
             assert.deepEqual([overlay.cursorHotX, overlay.cursorHotY], [14, 21]);
         });
     }
+});
+
+test('prompt layout uses the native orientation API shared by GNOME45–51', async () => {
+    const {overlay} = await runtime();
+    assert.equal(overlay.prompt.orientation, 1);
+    assert.equal(Object.hasOwn(overlay.prompt, 'vertical'), false);
+    assert.equal(overlay.prompt.children[0], overlay.inputActor);
+    overlay.destroy();
 });
 
 test('custom cursor loading retains the bitmap until valid native decoding succeeds', async () => {
@@ -184,7 +194,7 @@ test('cancellation cannot adopt a late cursor image and still closes the stream'
             await setImmediate();
             assert.equal(uploads.length, 1);
             assert.ok(events.includes('stream-close'));
-            assert.equal(overlay.input.actor.destroyed, false, 'input remains owned by the session');
+            assert.equal(overlay.inputActor.destroyed, false, 'input remains owned by the session');
         });
     }
 });

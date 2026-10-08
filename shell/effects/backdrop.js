@@ -177,7 +177,8 @@ export class BackdropEffect {
                 this.prepareScene();
             }
             if (knobs.clock.visible) {
-                this.clock = new St.BoxLayout({vertical: true, style_class: 'stealth-lock-effect-clock', reactive: false});
+                this.clock = new St.BoxLayout({style_class: 'stealth-lock-effect-clock', reactive: false});
+                this.clock.layout_manager.set_orientation(Clutter.Orientation.VERTICAL);
                 this.timeLabel = new St.Label({style_class: 'stealth-lock-effect-time', x_expand: true, x_align: Clutter.ActorAlign.CENTER});
                 this.timeLabel.style = `font-size: ${knobs.clock.fontSize}px;`;
                 this.clock.add_child(this.timeLabel);
@@ -206,6 +207,8 @@ export class BackdropEffect {
                 });
             }
             this._interfaceSettings.connectObject('notify::enable-animations', () => this.configureAnimation(), this.layer);
+            if (St.ReducedMotion)
+                this._interfaceSettings.connectObject('notify::reduced-motion', () => this.configureAnimation(), this.layer);
             this.configureAnimation();
         } catch (error) {
             this.destroy();
@@ -244,7 +247,8 @@ export class BackdropEffect {
         this.scene = this.config.effect === 'neo-rain'
             ? new DigitalRain(this.width, this.height, knobs, this._context)
             : new CityGrowth(this.width, this.height, knobs);
-        const frames = this._interfaceSettings.enable_animations ? 1 : 32;
+        const frames = this._interfaceSettings.enable_animations &&
+            (!St.ReducedMotion || this._interfaceSettings.reduced_motion !== St.ReducedMotion.REDUCE) ? 1 : 32;
         for (let i = 0; i < frames; i++)
             this.scene.advance(this._context, this.colors);
         this.area.queue_repaint();
@@ -258,7 +262,8 @@ export class BackdropEffect {
             GLib.Source.remove(this._animationTimer);
             this._animationTimer = 0;
         }
-        if (this.scene && this._interfaceSettings.enable_animations) {
+        if (this.scene && this._interfaceSettings.enable_animations &&
+            (!St.ReducedMotion || this._interfaceSettings.reduced_motion !== St.ReducedMotion.REDUCE)) {
             this._animationTimer = GLib.timeout_add(GLib.PRIORITY_DEFAULT, this.config.knobs.intervalMs, () => {
                 try {
                     this.scene.advance(this._context, this.colors);

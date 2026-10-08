@@ -3,30 +3,68 @@ import test from 'node:test';
 
 import {Cancellable, deferred, loadModule} from './harness.js';
 
-async function runtime({capture, verification, handoff = false, grabbed = true, freeze = false, pause = false, overlayError = false} = {}) {
+async function runtime({capture, verification, handoff = false, grabbed = true, freeze = false, pause = false,
+    overlayError = false, cursorMode = 'normal', cursorApi = 'visibility', cursorVisible = true,
+    cursorInhibitors = 0, nativeCursorInhibitor = false, mediaPause} = {}) {
     const events = [];
     const signals = new Map();
     const chrome = new Set();
     const sources = new Map();
     const state = new Map();
-    const lockdown = {disable_show_password: false};
+    const shortcuts = {lock: 7, abort: 8};
+    const native = {locked: handoff, onLock: null};
+    const display = {action: 0, get_keybinding_action() { return this.action; }};
     let nextSource = 1;
     const values = {
         'lock-type': 'stealth', 'pause-media': pause, 'freeze-display': freeze,
-        'cursor-mode': 'normal', 'auto-reset-seconds': 5, 'debug-mode': false,
+        'cursor-mode': cursorMode, 'auto-reset-seconds': 5, 'debug-mode': false,
         'normal-prompt-css': '', 'normal-background-css': '',
+        'lock-hotkey': ['<Super>l'], 'debug-abort-hotkey': ['<Alt>l'],
     };
     const settings = {
         get_boolean: key => values[key], get_string: key => values[key], get_uint: key => values[key],
-        get_strv: () => [], connectObject: () => {}, disconnectObject: () => events.push('settings-disconnect'),
+        get_strv: key => values[key], connectObject: () => {}, disconnectObject: () => events.push('settings-disconnect'),
     };
     const emitter = {
         connectObject: (signal, callback) => signals.set(signal, callback),
         disconnectObject: () => events.push('signals-disconnect'),
     };
+    const seat = {
+        inhibitors: cursorInhibitors === 0 ? 1 : 0,
+        inhibit_unfocus() { this.inhibitors++; events.push('pointer-focus-inhibit'); },
+        uninhibit_unfocus() {
+            assert.ok(this.inhibitors > 0);
+            this.inhibitors--;
+            events.push('pointer-focus-uninhibit');
+        },
+    };
+    const tracker = cursorApi === 'visibility' ? {
+        visible: cursorVisible,
+        get_pointer_visible() { return this.visible; },
+        set_pointer_visible(visible) { this.visible = visible; events.push(['cursor-visible', visible]); },
+        connectObject(_signal, callback) { this.visibilityChanged = callback; },
+        disconnectObject() { this.visibilityChanged = null; events.push('cursor-disconnect'); },
+    } : {
+        inhibitors: cursorInhibitors,
+        get_pointer_visible() { return this.inhibitors === 0; },
+        inhibit_cursor_visibility() {
+            this.inhibitors++;
+            if (this.inhibitors === 1)
+                seat.inhibitors--;
+            events.push('cursor-inhibit');
+        },
+        uninhibit_cursor_visibility() {
+            assert.ok(this.inhibitors > 0, 'every cursor release must correspond to an acquired inhibitor');
+            this.inhibitors--;
+            if (this.inhibitors === 0)
+                seat.inhibitors++;
+            events.push('cursor-uninhibit');
+        },
+    };
     const Clutter = {
         GrabState: {ALL: 3}, ContentGravity: {RESIZE_FILL: 0}, EVENT_PROPAGATE: false, EVENT_STOP: true,
-        EventType: {KEY_PRESS: 1, KEY_RELEASE: 2, MOTION: 3, IM_COMMIT: 4, IM_DELETE: 5, BUTTON_PRESS: 6, ENTER: 7, LEAVE: 8},
+        EventType: {KEY_PRESS: 1, KEY_RELEASE: 2, MOTION: 3, IM_COMMIT: 4, IM_DELETE: 5,
+            BUTTON_PRESS: 6, ENTER: 7, LEAVE: 8, IM_PREEDIT: 9, BUTTON_RELEASE: 10},
         ModifierType: {CONTROL_MASK: 1, MOD1_MASK: 2, SHIFT_MASK: 4, SUPER_MASK: 8, META_MASK: 16},
         KEY_Escape: 27, KEY_Return: 13, KEY_KP_Enter: 14, KEY_r: 114, KEY_R: 82,
         KEY_l: 108, KEY_L: 76, KEY_u: 117, KEY_U: 85, KEY_Super_L: 1001, KEY_Super_R: 1002,
@@ -62,15 +100,20 @@ async function runtime({capture, verification, handoff = false, grabbed = true, 
             this.discardPassword();
             return text;
         }
+        handleEvent(event) {
+            events.push(['input-event', event]);
+            return Clutter.EVENT_PROPAGATE;
+        }
         destroy() {
             this.discardPassword();
             events.push('input-destroy');
         }
     }
     class Overlay {
-        constructor() {
+        constructor(_settings, inputActor) {
             if (overlayError)
                 throw new Error('overlay construction failed');
+            assert.equal(typeof inputActor.grab_key_focus, 'function', 'overlay borrows only the native input actor');
             this.actor = {opacity: 255, ...emitter};
             this.info = {text: ''};
             this.background = {set_content: () => events.push('screenshot-adopt'), set_content_gravity: () => {}};
@@ -97,9 +140,25 @@ async function runtime({capture, verification, handoff = false, grabbed = true, 
             return result;
         }
     }
+    class Media {
+        constructor(cancellable) { this.cancellable = cancellable; }
+        async pause() {
+            events.push('media-pause');
+            if (mediaPause)
+                await mediaPause.promise;
+            this.cancellable.set_error_if_cancelled();
+        }
+        close({resume}) {
+            assert.equal(this.cancellable.is_cancelled(), true, 'session cancels owned work before releasing media');
+            events.push(['media-close', resume]);
+            if (pause && resume)
+                events.push('media-resume');
+        }
+    }
     const global = {
-        stage: {},
-        display: {get_keybinding_action: () => 0},
+        stage: {context: {get_backend: () => ({get_default_seat: () => seat})}},
+        backend: {get_cursor_tracker: () => tracker},
+        display,
         set_runtime_state: (key, value) => value === null ? state.delete(key) : state.set(key, value.value),
     };
     const GLib = {
@@ -112,27 +171,33 @@ async function runtime({capture, verification, handoff = false, grabbed = true, 
         },
         Source: {remove: id => sources.delete(id)},
     };
-    const module = await loadModule('lockSession.js', {
+    const module = await loadModule('shell/lockSession.js', {
         'gi://Clutter': {default: Clutter}, 'gi://Gio': {default: {Cancellable}},
-        'gi://GLib': {default: GLib}, 'gi://Meta': {default: {KeyBindingAction: {NONE: 0}}},
+        'gi://GLib': {default: GLib}, 'gi://Meta': {default: {KeyBindingAction: {NONE: 0},
+            CursorTracker: cursorApi === 'visibility' ? {get_for_display: () => tracker} : {}}},
         'gi://Shell': {default: {ActionMode: {NONE: 0}}},
-        'gi://St': {default: {Settings: {get: () => lockdown}}},
         'resource:///org/gnome/shell/ui/main.js': Main,
         './authentication.js': {Authentication: Auth, MAX_PASSWORD_BYTES: 512}, './input.js': {PasswordInput: Input},
         './overlay.js': {LockOverlay: Overlay},
+        './media.js': {PausedMedia: Media},
         './screenshot.js': {captureScreenshot: async cancellable => {
             events.push('capture');
             const screenshot = capture ? await capture.promise : {content: {}};
             cancellable.set_error_if_cancelled();
             return screenshot;
         }},
-        './shell.js': {handoffToSystemLock: () => {
+        './integration.js': {handoffToSystemLock: () => {
             events.push('native-lock-request');
-            return handoff;
+            native.onLock?.();
+            if (handoff && nativeCursorInhibitor) {
+                seat.inhibit_unfocus();
+                tracker.inhibit_cursor_visibility();
+            }
+            return native.locked;
         }},
     }, {global, TextEncoder, console: {error: message => events.push(message), warn: message => events.push(message)}});
-    const session = new module.LockSession({path: '/extension', getSettings: () => settings}, () => events.push('closed'));
-    return {session, events, signals, sources, state, settings, values, Clutter, chrome, lockdown, key: (key, state = 0) => ({
+    const session = new module.LockSession({path: '/extension', settings, shortcuts, onClosed: () => events.push('closed')});
+    return {session, events, signals, sources, state, settings, values, Clutter, chrome, shortcuts, display, native, tracker, seat, key: (key, state = 0) => ({
         type: () => Clutter.EventType.KEY_PRESS, get_key_symbol: () => key, get_state: () => state,
         get_key_code: () => 1, get_key_unicode: () => key,
     })};
@@ -213,21 +278,32 @@ test('oversized Unicode input is cleared and rejected with byte-limit feedback b
     session.close();
 });
 
-test('Ctrl+R respects live GNOME reveal policy and remains blocked in stealth mode', async () => {
-    const {session, lockdown, key, Clutter} = await runtime();
+test('password input receives events only while the session is ready and not authenticating', async () => {
+    const capture = deferred();
+    const {session, events, key, Clutter} = await runtime({freeze: true, capture});
+    const startup = session.start();
+    const event = key(Clutter.KEY_r, Clutter.ModifierType.CONTROL_MASK);
+    assert.equal(session.handleEvent(event), Clutter.EVENT_STOP);
+    assert.equal(events.some(event => Array.isArray(event) && event[0] === 'input-event'), false);
+    capture.resolve({content: {}});
+    await startup;
+    assert.equal(session.handleEvent(event), Clutter.EVENT_PROPAGATE);
+    assert.equal(events.at(-1)[1], event);
+    session._authentication.busy = true;
+    assert.equal(session.handleEvent(event), Clutter.EVENT_STOP);
+    assert.equal(events.filter(event => Array.isArray(event) && event[0] === 'input-event').length, 1);
+    session.close();
+});
+
+test('prompt presentation changes cannot alter delegation to password input', async () => {
+    const {session, events, key, Clutter} = await runtime();
     await session.start();
     const reveal = key(Clutter.KEY_r, Clutter.ModifierType.CONTROL_MASK);
-    session._overlay.prompt.visible = true;
-    assert.equal(session.handleEvent(reveal), Clutter.EVENT_STOP);
-    assert.equal(session._input.actor.password_visible, true);
-    session._input.actor.password_visible = false;
-    lockdown.disable_show_password = true;
-    assert.equal(session.handleEvent(reveal), Clutter.EVENT_STOP);
-    assert.equal(session._input.actor.password_visible, false);
-    lockdown.disable_show_password = false;
-    session._overlay.prompt.visible = false;
-    assert.equal(session.handleEvent(reveal), Clutter.EVENT_STOP);
-    assert.equal(session._input.actor.password_visible, false);
+    for (const visible of [false, true]) {
+        session._overlay.prompt.visible = visible;
+        assert.equal(session.handleEvent(reveal), Clutter.EVENT_PROPAGATE);
+    }
+    assert.equal(events.filter(event => Array.isArray(event) && event[0] === 'input-event').length, 2);
     session.close();
 });
 
@@ -246,7 +322,7 @@ test('cooldown submission clears the entry and reports retry time without starti
 test('cleanup continues after an individual teardown fails', async () => {
     const {session, events} = await runtime();
     await session.start();
-    session._cleanup.push({release: () => { throw new Error('broken resource'); }});
+    session._cleanup.push(() => { throw new Error('broken resource'); });
     session.close();
     assert.ok(events.includes('ungrab'));
     assert.ok(events.includes('input-destroy'));
@@ -283,9 +359,8 @@ test('overlay constructor failure still discards the immediately owned password 
 });
 
 test('handoff only releases overlay after confirmed native lock and defers media restore', async () => {
-    const {session, events, state} = await runtime({handoff: true});
+    const {session, events, state} = await runtime({handoff: true, pause: true});
     await session.start();
-    session._cleanup.push({media: true, release: () => events.push('media-resume')});
     assert.equal(session.handoff(), true);
     assert.ok(events.indexOf('native-lock-request') < events.indexOf('ungrab'));
     assert.ok(!events.includes('media-resume'));
@@ -295,12 +370,184 @@ test('handoff only releases overlay after confirmed native lock and defers media
     assert.equal(state.has('stealth-lock@user.locked'), false);
 });
 
+test('session owns native notifications and restores media only after actual native unlock', async () => {
+    const {session, events, state} = await runtime({pause: true});
+    await session.start();
+    session.systemLockChanged(false);
+    assert.equal(events.includes('ungrab'), false);
+    assert.equal(state.get('stealth-lock@user.locked'), true);
+    session.systemLockChanged(true);
+    session.systemLockChanged(true);
+    assert.equal(session.cancellable.is_cancelled(), true);
+    assert.equal(events.filter(event => event === 'ungrab').length, 1);
+    assert.equal(events.some(event => Array.isArray(event) && event[0] === 'media-close'), false);
+    assert.equal(events.includes('closed'), false);
+    session.systemLockChanged(false);
+    session.systemLockChanged(false);
+    assert.equal(events.filter(event => event === 'media-resume').length, 1);
+    assert.equal(events.filter(event => event === 'closed').length, 1);
+    assert.equal(state.has('stealth-lock@user.locked'), false);
+});
+
+test('synchronous shield notifications cannot release the privacy grab before handoff confirmation', async () => {
+    const {session, events, native} = await runtime();
+    await session.start();
+    native.onLock = () => {
+        session.systemLockChanged(true);
+        session.systemLockChanged(false);
+        assert.equal(events.includes('ungrab'), false);
+        assert.equal(session.cancellable.is_cancelled(), false);
+    };
+    assert.equal(session.handoff(), false);
+    assert.equal(events.includes('ungrab'), false);
+    native.onLock = null;
+    native.locked = true;
+    assert.equal(session.handoff(), true);
+    assert.equal(events.filter(event => event === 'ungrab').length, 1);
+    session.systemLockChanged(false);
+});
+
+test('disable owns native fallback, preserves recovery and discards media at every startup boundary', async t => {
+    for (const handoff of [false, true]) {
+        for (const preparing of [false, true]) {
+            await t.test(`native ${handoff}, preparing ${preparing}`, async () => {
+                const mediaPause = preparing ? deferred() : null;
+                const {session, events, state} = await runtime({pause: true, handoff, mediaPause});
+                const startup = session.start();
+                if (!preparing)
+                    await startup;
+                session.disable();
+                session.disable();
+                assert.equal(session.cancellable.is_cancelled(), true);
+                assert.ok(events.indexOf('native-lock-request') < events.indexOf('ungrab'));
+                assert.equal(events.filter(event => event === 'native-lock-request').length, 1);
+                assert.equal(events.filter(event => event === 'closed').length, 1);
+                assert.equal(events.filter(event => Array.isArray(event) && event[0] === 'media-close').length, 1);
+                assert.equal(events.find(event => Array.isArray(event) && event[0] === 'media-close')[1], false);
+                assert.equal(events.includes('media-resume'), false);
+                assert.equal(state.get('stealth-lock@user.locked'), true);
+                if (preparing) {
+                    mediaPause.resolve();
+                    await startup;
+                    assert.equal(events.includes('focus'), false);
+                }
+            });
+        }
+    }
+});
+
+test('disable after native activation never requests another lock or resumes media', async () => {
+    const {session, events, state} = await runtime({pause: true});
+    await session.start();
+    session.systemLockChanged(true);
+    session.disable();
+    assert.equal(events.includes('native-lock-request'), false);
+    assert.equal(events.includes('media-resume'), false);
+    assert.equal(state.get('stealth-lock@user.locked'), true);
+    assert.equal(events.filter(event => event === 'ungrab').length, 1);
+});
+
+test('diagnostic abort matching uses live registered shortcut values independently of the extension', async () => {
+    const {session, events, values, shortcuts, display, key} = await runtime();
+    await session.start();
+    values['debug-mode'] = true;
+    display.action = shortcuts.abort;
+    session.handleEvent(key(97));
+    assert.equal(events.filter(event => event === 'native-lock-request').length, 1);
+    shortcuts.abort = 9;
+    session.handleEvent(key(97));
+    assert.equal(events.filter(event => event === 'native-lock-request').length, 1);
+    display.action = 9;
+    session.handleEvent(key(97));
+    assert.equal(events.filter(event => event === 'native-lock-request').length, 2);
+    values['debug-abort-use-lock-hotkey'] = true;
+    display.action = shortcuts.lock;
+    session.handleEvent(key(97));
+    assert.equal(events.filter(event => event === 'native-lock-request').length, 3);
+    values['debug-abort-use-lock-hotkey'] = false;
+    values['debug-abort-hotkey'] = values['lock-hotkey'];
+    session.handleEvent(key(97));
+    assert.equal(events.filter(event => event === 'native-lock-request').length, 4);
+    session.close();
+});
+
+test('GNOME45–48 cursor visibility is enforced and restored to its original value once', async t => {
+    for (const cursorVisible of [true, false]) {
+        await t.test(`original visibility ${cursorVisible}`, async () => {
+            const state = await runtime({cursorMode: 'hidden', cursorVisible});
+            await state.session.start();
+            assert.equal(state.tracker.visible, false);
+            state.tracker.visible = true;
+            state.tracker.visibilityChanged();
+            assert.equal(state.tracker.visible, false);
+            state.session.close();
+            assert.equal(state.tracker.visible, cursorVisible);
+            const released = state.events.filter(event => event === 'cursor-disconnect').length;
+            state.session.close();
+            assert.equal(state.events.filter(event => event === 'cursor-disconnect').length, released);
+        });
+    }
+});
+
+test('GNOME49–51 cursor ownership releases only its own inhibitor on ordinary close', async t => {
+    for (const cursorInhibitors of [0, 1]) {
+        await t.test(`existing inhibitors ${cursorInhibitors}`, async () => {
+            const state = await runtime({cursorMode: 'lock-icon', cursorApi: 'inhibitor', cursorInhibitors});
+            await state.session.start();
+            assert.equal(state.tracker.inhibitors, cursorInhibitors + 1);
+            assert.equal(state.seat.inhibitors, 1, 'the hidden pointer remains usable inside the modal');
+            assert.equal(state.tracker.get_pointer_visible(), false);
+            state.session.close();
+            state.session.close();
+            assert.equal(state.tracker.inhibitors, cursorInhibitors);
+            assert.equal(state.seat.inhibitors, cursorInhibitors === 0 ? 1 : 0);
+            assert.equal(state.events.filter(event => event === 'cursor-inhibit').length, 1);
+            assert.equal(state.events.filter(event => event === 'cursor-uninhibit').length, 1);
+            assert.equal(state.events.filter(event => event === 'pointer-focus-inhibit').length, 1);
+            assert.equal(state.events.filter(event => event === 'pointer-focus-uninhibit').length, 1);
+        });
+    }
+});
+
+test('native lock handoff retains its cursor inhibitor and releases the extension inhibitor', async () => {
+    const state = await runtime({cursorMode: 'hidden', cursorApi: 'inhibitor', handoff: true, nativeCursorInhibitor: true});
+    await state.session.start();
+    assert.equal(state.tracker.inhibitors, 1);
+    assert.equal(state.session.handoff(), true);
+    assert.equal(state.tracker.inhibitors, 1, 'the native ScreenShield still owns visibility');
+    assert.equal(state.tracker.get_pointer_visible(), false);
+    assert.equal(state.seat.inhibitors, 1, 'the native shield owns its hidden pointer focus');
+    state.session.close();
+    assert.equal(state.tracker.inhibitors, 1, 'later extension teardown cannot release the native shield');
+    assert.equal(state.events.filter(event => event === 'cursor-uninhibit').length, 1);
+    state.tracker.uninhibit_cursor_visibility();
+    state.seat.uninhibit_unfocus();
+    assert.equal(state.tracker.get_pointer_visible(), true);
+    assert.equal(state.seat.inhibitors, 1, 'native visible pointer focus returns to its original state');
+});
+
+test('normal cursor mode never acquires or releases native visibility ownership', async t => {
+    for (const cursorApi of ['visibility', 'inhibitor']) {
+        await t.test(cursorApi, async () => {
+            const state = await runtime({cursorApi});
+            await state.session.start();
+            state.session.close();
+            assert.equal(state.seat.inhibitors, 1);
+            assert.equal(state.events.some(event => typeof event === 'string' && event.startsWith('cursor-') ||
+                typeof event === 'string' && event.startsWith('pointer-focus-') ||
+                Array.isArray(event) && event[0] === 'cursor-visible'), false);
+        });
+    }
+});
+
 test('denied handoff never releases the overlay or clears recovery state', async () => {
-    const {session, events, state} = await runtime();
+    const {session, events, state, tracker, seat} = await runtime({cursorMode: 'hidden', cursorApi: 'inhibitor'});
     await session.start();
     assert.equal(session.handoff(), false);
     assert.ok(!events.includes('ungrab'));
     assert.equal(state.get('stealth-lock@user.locked'), true);
+    assert.equal(tracker.inhibitors, 1);
+    assert.equal(seat.inhibitors, 1);
     session.close();
 });
 
@@ -335,14 +582,6 @@ test('Escape clears text without unlocking, repeated Escape in debug requests na
         session.handleEvent(key(Clutter.KEY_Escape));
     assert.ok(events.includes('native-lock-request'));
     assert.ok(!events.includes('ungrab'));
-    session.close();
-});
-
-test('clipboard paste shortcuts and modifier release cannot escape input protection', async () => {
-    const {session, key, Clutter} = await runtime();
-    await session.start();
-    assert.equal(session.handleEvent(key(Clutter.KEY_Insert, Clutter.ModifierType.SHIFT_MASK)), Clutter.EVENT_STOP);
-    assert.equal(session.handleEvent({type: () => Clutter.EventType.KEY_RELEASE, get_key_symbol: () => Clutter.KEY_Super_L}), Clutter.EVENT_STOP);
     session.close();
 });
 

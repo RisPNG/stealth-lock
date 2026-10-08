@@ -3,26 +3,25 @@ import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
 import Meta from 'gi://Meta';
 import Shell from 'gi://Shell';
-import St from 'gi://St';
 
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 
 import {Authentication, MAX_PASSWORD_BYTES} from './authentication.js';
 import {PasswordInput} from './input.js';
 import {LockOverlay} from './overlay.js';
+import {PausedMedia} from './media.js';
 import {captureScreenshot} from './screenshot.js';
-import {handoffToSystemLock} from './shell.js';
+import {handoffToSystemLock} from './integration.js';
 
-const MPRIS_PATH = '/org/mpris/MediaPlayer2';
-const MPRIS_PLAYER = 'org.mpris.MediaPlayer2.Player';
 export const LOCKED_STATE = 'stealth-lock@user.locked';
 
 export class LockSession {
-    constructor(extension, onClosed) {
+    constructor({settings, path, shortcuts, onClosed}) {
         this.cancellable = new Gio.Cancellable();
-        this._extension = extension;
-        this._settings = extension.getSettings();
-        this._authentication = new Authentication(extension.path, this.cancellable);
+        this._settings = settings;
+        this._shortcuts = shortcuts;
+        this._authentication = new Authentication(path, this.cancellable);
+        this._media = new PausedMedia(this.cancellable);
         this._onClosed = onClosed;
         this._cleanup = [];
         this._closed = false;
@@ -46,24 +45,24 @@ export class LockSession {
                 onActivity: () => this.resetPasswordTimeout(),
             });
             const input = this._input;
-            this._cleanup.push({release: () => input.destroy()});
-            this._overlay = new LockOverlay(this._settings, input, this.cancellable);
+            this._cleanup.push(() => input.destroy());
+            this._overlay = new LockOverlay(this._settings, input.actor, this.cancellable);
             const overlay = this._overlay;
-            this._cleanup.push({release: () => overlay.destroy()});
+            this._cleanup.push(() => overlay.destroy());
             overlay.actor.opacity = 0;
             Main.layoutManager.addTopChrome(overlay.actor);
             overlay.positionPrompt();
             const grab = Main.pushModal(overlay.actor, {actionMode: Shell.ActionMode.NONE});
-            this._cleanup.push({release: () => Main.popModal(grab)});
+            this._cleanup.push(() => Main.popModal(grab));
             if ((grab.get_seat_state() & Clutter.GrabState.ALL) !== Clutter.GrabState.ALL)
                 throw new Error('Could not acquire the keyboard and pointer');
             this._grabbed = true;
             global.set_runtime_state(LOCKED_STATE, new GLib.Variant('b', true));
 
             overlay.actor.connectObject('captured-event', (_actor, event) => this.handleEvent(event), overlay.actor);
-            this._cleanup.push({release: () => overlay.actor.disconnectObject(overlay.actor)});
+            this._cleanup.push(() => overlay.actor.disconnectObject(overlay.actor));
             Main.layoutManager.connectObject('monitors-changed', () => this.handoff(), overlay.actor);
-            this._cleanup.push({release: () => Main.layoutManager.disconnectObject(overlay.actor)});
+            this._cleanup.push(() => Main.layoutManager.disconnectObject(overlay.actor));
             this._settings.connectObject(
                 'changed::normal-prompt-css', () => overlay.refreshStyle(),
                 'changed::normal-background-css', () => overlay.refreshStyle(),
@@ -81,16 +80,16 @@ export class LockSession {
                 },
                 overlay.actor
             );
-            this._cleanup.push({release: () => this._settings.disconnectObject(overlay.actor)});
-            this._cleanup.push({release: () => {
+            this._cleanup.push(() => this._settings.disconnectObject(overlay.actor));
+            this._cleanup.push(() => {
                 if (this._passwordReset) {
                     GLib.Source.remove(this._passwordReset);
                     this._passwordReset = 0;
                 }
-            }});
+            });
 
             if (this._settings.get_boolean('pause-media')) {
-                await this.pauseMedia();
+                await this._media.pause();
                 this.cancellable.set_error_if_cancelled();
             }
             if (this._settings.get_boolean('freeze-display')) {
@@ -103,17 +102,25 @@ export class LockSession {
                 const tracker = Meta.CursorTracker.get_for_display
                     ? Meta.CursorTracker.get_for_display(global.display)
                     : global.backend.get_cursor_tracker();
-                const visible = tracker.get_pointer_visible();
-                tracker.connectObject('visibility-changed', () => {
-                    if (!this._nativeLock && !this._closed)
-                        tracker.set_pointer_visible(false);
-                }, overlay.actor);
-                this._cleanup.push({release: () => tracker.disconnectObject(overlay.actor)});
-                tracker.set_pointer_visible(false);
-                this._cleanup.push({release: () => {
-                    if (!this._nativeLock)
-                        tracker.set_pointer_visible(visible);
-                }});
+                if (tracker.inhibit_cursor_visibility) {
+                    const seat = global.stage.context.get_backend().get_default_seat();
+                    seat.inhibit_unfocus();
+                    this._cleanup.push(() => seat.uninhibit_unfocus());
+                    tracker.inhibit_cursor_visibility();
+                    this._cleanup.push(() => tracker.uninhibit_cursor_visibility());
+                } else {
+                    const visible = tracker.get_pointer_visible();
+                    tracker.connectObject('visibility-changed', () => {
+                        if (!this._nativeLock && !this._closed)
+                            tracker.set_pointer_visible(false);
+                    }, overlay.actor);
+                    this._cleanup.push(() => tracker.disconnectObject(overlay.actor));
+                    tracker.set_pointer_visible(false);
+                    this._cleanup.push(() => {
+                        if (!this._nativeLock)
+                            tracker.set_pointer_visible(visible);
+                    });
+                }
             }
             overlay.refreshEffect();
             this._ready = true;
@@ -162,7 +169,7 @@ export class LockSession {
                 const useLock = this._settings.get_boolean('debug-abort-use-lock-hotkey') ||
                     this._settings.get_strv('debug-abort-hotkey')[0] === this._settings.get_strv('lock-hotkey')[0];
                 const action = global.display.get_keybinding_action(event.get_key_code(), state);
-                const abort = useLock ? this._extension._lockAction : this._extension._abortAction;
+                const abort = useLock ? this._shortcuts.lock : this._shortcuts.abort;
                 if (abort !== Meta.KeyBindingAction.NONE && action === abort) {
                     this.handoff();
                     return Clutter.EVENT_STOP;
@@ -180,45 +187,12 @@ export class LockSession {
             if (!this._ready || this._authentication.busy)
                 return Clutter.EVENT_STOP;
             this.resetPasswordTimeout(true);
-            if (control && !alt && (key === Clutter.KEY_r || key === Clutter.KEY_R) && this._overlay.prompt.visible) {
-                if (!St.Settings.get().disable_show_password)
-                    this._input.actor.password_visible = !this._input.actor.password_visible;
-                return Clutter.EVENT_STOP;
-            }
-            if (control && !alt && (key === Clutter.KEY_u || key === Clutter.KEY_U)) {
-                this._input.discardPassword();
-                return Clutter.EVENT_STOP;
-            }
-            if (shift && key === Clutter.KEY_Insert)
-                return Clutter.EVENT_STOP;
-            if (key === Clutter.KEY_Super_L || key === Clutter.KEY_Super_R ||
-                (state & (Clutter.ModifierType.SUPER_MASK | Clutter.ModifierType.META_MASK)) || control)
-                return Clutter.EVENT_STOP;
-            if (alt && event.get_key_unicode() === 0)
-                return Clutter.EVENT_STOP;
-            this._input.actor.grab_key_focus();
-            return Clutter.EVENT_PROPAGATE;
         }
         if (!this._ready || this._authentication.busy)
             return Clutter.EVENT_STOP;
-        if (type === Clutter.EventType.KEY_RELEASE) {
-            const key = event.get_key_symbol();
-            if (key === Clutter.KEY_Super_L || key === Clutter.KEY_Super_R || key === Clutter.KEY_Meta_L || key === Clutter.KEY_Meta_R)
-                return Clutter.EVENT_STOP;
-            return Clutter.EVENT_PROPAGATE;
-        }
-        if (type === Clutter.EventType.IM_COMMIT || type === Clutter.EventType.IM_DELETE || type === Clutter.EventType.IM_PREEDIT) {
+        if (type === Clutter.EventType.IM_COMMIT || type === Clutter.EventType.IM_DELETE || type === Clutter.EventType.IM_PREEDIT)
             this.resetPasswordTimeout(type === Clutter.EventType.IM_PREEDIT && !!event.get_im_text());
-            return Clutter.EVENT_PROPAGATE;
-        }
-        const source = event.get_source();
-        if ((type === Clutter.EventType.BUTTON_PRESS || type === Clutter.EventType.BUTTON_RELEASE) &&
-            event.get_button() === 1 && this._overlay.prompt.visible) {
-            const peek = this._input.actor.get_secondary_icon();
-            if (peek && source && (source === peek || peek.contains(source)))
-                return Clutter.EVENT_PROPAGATE;
-        }
-        return Clutter.EVENT_STOP;
+        return this._input.handleEvent(event);
     }
 
     resetPasswordTimeout(inputEvent = false) {
@@ -294,24 +268,29 @@ export class LockSession {
         }
     }
 
+    systemLockChanged(locked) {
+        if (this._handoff || this._closed)
+            return;
+        if (locked)
+            this.nativeLockActivated();
+        else if (this._nativeLock)
+            this.close();
+    }
+
+    disable() {
+        if (this._closed)
+            return;
+        if (!this._nativeLock)
+            this.handoff();
+        this.close({resumeMedia: false, clearState: false});
+    }
+
     nativeLockActivated() {
         if (this._closed || this._nativeLock)
             return;
         this._nativeLock = true;
         this.cancellable.cancel();
-        for (let index = this._cleanup.length - 1; index >= 0; index--) {
-            const resource = this._cleanup[index];
-            if (resource.media)
-                continue;
-            this._cleanup.splice(index, 1);
-            try {
-                resource.release();
-            } catch (error) {
-                console.error(`Stealth Lock: cleanup failed: ${error.message}`);
-            }
-        }
-        this._overlay = null;
-        this._input = null;
+        this.releasePrivacyResources();
     }
 
     close({resumeMedia = true, clearState = true} = {}) {
@@ -321,102 +300,20 @@ export class LockSession {
         this.cancellable.cancel();
         if (clearState)
             global.set_runtime_state(LOCKED_STATE, null);
-        for (const resource of this._cleanup.splice(0).reverse()) {
-            if (resource.media && !resumeMedia)
-                continue;
+        this._media.close({resume: resumeMedia});
+        this.releasePrivacyResources();
+        this._onClosed();
+    }
+
+    releasePrivacyResources() {
+        for (const release of this._cleanup.splice(0).reverse()) {
             try {
-                resource.release();
+                release();
             } catch (error) {
                 console.error(`Stealth Lock: cleanup failed: ${error.message}`);
             }
         }
         this._overlay = null;
         this._input = null;
-        this._onClosed();
-    }
-
-    async pauseMedia() {
-        const bus = Gio.DBus.session;
-        try {
-            const names = await new Promise((resolve, reject) => {
-                bus.call('org.freedesktop.DBus', '/org/freedesktop/DBus', 'org.freedesktop.DBus', 'ListNames',
-                    null, new GLib.VariantType('(as)'), Gio.DBusCallFlags.NONE, 2000, this.cancellable, (connection, result) => {
-                        try {
-                            resolve(connection.call_finish(result).deep_unpack()[0]);
-                        } catch (error) {
-                            reject(error);
-                        }
-                    });
-            });
-            this.cancellable.set_error_if_cancelled();
-            const owners = new Set();
-            await Promise.all(names.filter(name => name.startsWith('org.mpris.MediaPlayer2.')).map(async name => {
-                let restoration = null;
-                try {
-                    const owner = await new Promise((resolve, reject) => {
-                        bus.call('org.freedesktop.DBus', '/org/freedesktop/DBus', 'org.freedesktop.DBus', 'GetNameOwner',
-                            new GLib.Variant('(s)', [name]), new GLib.VariantType('(s)'), Gio.DBusCallFlags.NONE, 2000,
-                            this.cancellable, (connection, result) => {
-                                try {
-                                    resolve(connection.call_finish(result).deep_unpack()[0]);
-                                } catch (error) {
-                                    reject(error);
-                                }
-                            });
-                    });
-                    this.cancellable.set_error_if_cancelled();
-                    if (owners.has(owner))
-                        return;
-                    owners.add(owner);
-                    const status = await new Promise((resolve, reject) => {
-                        bus.call(owner, MPRIS_PATH, 'org.freedesktop.DBus.Properties', 'Get',
-                            new GLib.Variant('(ss)', [MPRIS_PLAYER, 'PlaybackStatus']), new GLib.VariantType('(v)'),
-                            Gio.DBusCallFlags.NONE, 2000, this.cancellable, (connection, result) => {
-                                try {
-                                    resolve(connection.call_finish(result).deep_unpack()[0].deep_unpack());
-                                } catch (error) {
-                                    reject(error);
-                                }
-                            });
-                    });
-                    this.cancellable.set_error_if_cancelled();
-                    if (status !== 'Playing')
-                        return;
-                    restoration = {media: true, release: () => {
-                        bus.call(owner, MPRIS_PATH, MPRIS_PLAYER, 'Play', null, null,
-                            Gio.DBusCallFlags.NO_AUTO_START, 2000, null, (connection, result) => {
-                                try {
-                                    connection.call_finish(result);
-                                } catch (error) {
-                                    console.warn(`Stealth Lock: media resume failed for ${owner}: ${error.message}`);
-                                }
-                            });
-                    }};
-                    this._cleanup.push(restoration);
-                    await new Promise((resolve, reject) => {
-                        bus.call(owner, MPRIS_PATH, MPRIS_PLAYER, 'Pause', null, null,
-                            Gio.DBusCallFlags.NO_AUTO_START, 2000, this.cancellable, (connection, result) => {
-                                try {
-                                    connection.call_finish(result);
-                                    resolve();
-                                } catch (error) {
-                                    reject(error);
-                                }
-                            });
-                    });
-                    this.cancellable.set_error_if_cancelled();
-                } catch (error) {
-                    if (!this.cancellable.is_cancelled()) {
-                        if (restoration)
-                            this._cleanup.splice(this._cleanup.indexOf(restoration), 1);
-                        console.warn(`Stealth Lock: media pause failed: ${error.message}`);
-                    }
-                }
-            }));
-            this.cancellable.set_error_if_cancelled();
-        } catch (error) {
-            if (!this.cancellable.is_cancelled())
-                console.warn(`Stealth Lock: media unavailable: ${error.message}`);
-        }
     }
 }

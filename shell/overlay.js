@@ -9,8 +9,8 @@ import St from 'gi://St';
 
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 
-import {BackdropEffect} from './effects.js';
-import {readEffectPresets, validateEffectConfig} from './presets.js';
+import {BackdropEffect} from './effects/backdrop.js';
+import {readSavedEntries, validateEffectConfig} from '../shared/presets.js';
 
 const LOCK_CURSOR_XBM = {
     width: 28,
@@ -52,9 +52,9 @@ const LOCK_CURSOR_XBM = {
 };
 
 export class LockOverlay {
-    constructor(settings, input, cancellable) {
+    constructor(settings, inputActor, cancellable) {
         this.settings = settings;
-        this.input = input;
+        this.inputActor = inputActor;
         this.effect = null;
         [this.pointerX, this.pointerY] = global.get_pointer();
         this.monitors = Main.layoutManager.monitors.map(monitor => ({...monitor}));
@@ -76,13 +76,14 @@ export class LockOverlay {
             this.backdrop = new St.Widget({width: this.width, height: this.height});
             this.actor.add_child(this.background);
             this.actor.add_child(this.backdrop);
-            this.prompt = new St.BoxLayout({style_class: 'stealth-lock-prompt', vertical: true});
+            this.prompt = new St.BoxLayout({style_class: 'stealth-lock-prompt'});
+            this.prompt.layout_manager.set_orientation(Clutter.Orientation.VERTICAL);
             this.actor.add_child(this.prompt);
-            this.prompt.add_child(input.actor);
+            this.prompt.add_child(inputActor);
             this.prompt.visible = settings.get_string('lock-type') === 'normal';
             if (!this.prompt.visible) {
-                this.prompt.remove_child(input.actor);
-                this.actor.add_child(input.actor);
+                this.prompt.remove_child(inputActor);
+                this.actor.add_child(inputActor);
             }
             this.status = new St.Label({style_class: 'stealth-lock-status'});
             this.status.clutter_text.line_wrap = true;
@@ -131,7 +132,7 @@ export class LockOverlay {
             }
             this.movePointer(this.pointerX, this.pointerY);
         } catch (error) {
-            input.actor.get_parent()?.remove_child(input.actor);
+            inputActor.get_parent()?.remove_child(inputActor);
             this.actor.destroy();
             throw error;
         }
@@ -208,7 +209,7 @@ export class LockOverlay {
         if (!active)
             return;
         try {
-            const entry = readEffectPresets(this.settings).find(preset => preset.name === active);
+            const entry = readSavedEntries(this.settings, 'visual-effect-presets').find(preset => preset.name === active);
             if (!entry)
                 return;
             this.effect = new BackdropEffect({
@@ -282,7 +283,7 @@ export class LockOverlay {
     destroy() {
         this.effect?.destroy();
         this.effect = null;
-        this.input.actor.get_parent()?.remove_child(this.input.actor);
+        this.inputActor.get_parent()?.remove_child(this.inputActor);
         this.background.set_content(null);
         // Clutter retains queued actors until layout completes, even after destruction.
         this.actor.get_allocation_box();

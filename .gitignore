@@ -7,4 +7,3 @@ __pycache__/
 *.junit.xml
 .venv/
 .env
-REBUILD-NOTES/

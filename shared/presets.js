@@ -157,37 +157,34 @@ export const DEFAULT_EFFECT_PRESETS = [
     code: JSON.stringify(validateEffectConfig(JSON.stringify({effect, knobs: {clock: {visible: effect === 'city-grow'}}})), null, 2),
 }));
 
-export function initializeEffectPresets(settings, {freshInstall} = {}) {
+export function initializeEffectPresets(settings) {
     if (settings.get_boolean('visual-effect-initialized'))
         return true;
     const libraryExists = settings.get_user_value('visual-effect-presets') !== null ||
         settings.get_user_value('visual-effect-active') !== null;
-    const previousProfile = freshInstall === undefined && settings.settings_schema.list_keys().some(key =>
-        !['visual-effect-presets', 'visual-effect-active', 'visual-effect-initialized'].includes(key) && settings.get_user_value(key) !== null);
-    if (freshInstall !== false && !libraryExists && !previousProfile &&
-        !settings.set_string('visual-effect-presets', JSON.stringify(DEFAULT_EFFECT_PRESETS)))
+    if (!libraryExists && !settings.set_string('visual-effect-presets', JSON.stringify(DEFAULT_EFFECT_PRESETS)))
         return false;
     return settings.set_boolean('visual-effect-initialized', true);
 }
 
-export function readEffectPresets(settings) {
+export function readSavedEntries(settings, key) {
     let entries;
     try {
-        entries = JSON.parse(settings.get_string('visual-effect-presets'));
+        entries = JSON.parse(settings.get_string(key));
     } catch {
-        throw new Error('Saved effect presets are not valid JSON');
+        throw new Error('Saved entries are not valid JSON');
     }
     if (!Array.isArray(entries))
-        throw new Error('Saved effect presets must be an array');
+        throw new Error('Saved entries must be an array');
     const names = new Set();
     for (const entry of entries) {
         if (entry === null || typeof entry !== 'object' || Array.isArray(entry) ||
             typeof entry.name !== 'string' || !entry.name.trim() || typeof entry.code !== 'string' ||
             Object.keys(entry).some(key => key !== 'name' && key !== 'code'))
-            throw new Error('Each saved effect preset must contain a nonempty name and configuration text');
+            throw new Error('Each saved entry must contain a nonempty name and code text');
         const name = entry.name.trim().toLowerCase();
         if (names.has(name))
-            throw new Error(`Saved effect preset names must be unique: ${entry.name}`);
+            throw new Error(`Saved entry names must be unique: ${entry.name}`);
         names.add(name);
     }
     return entries;
@@ -197,15 +194,15 @@ if (Array.isArray(globalThis.ARGV)) {
     const System = await import('system');
     const {default: Gio} = await import('gi://Gio');
     if (Gio.File.new_for_path(System.programInvocationName).get_uri() === import.meta.url) {
-        const [schemaDirectory, freshInstall] = System.programArgs;
-        if (System.programArgs.length !== 2 || !['true', 'false'].includes(freshInstall))
-            throw new Error('Usage: gjs -m presets.js <schemas-directory> true|false');
+        const [schemaDirectory] = System.programArgs;
+        if (System.programArgs.length !== 1)
+            throw new Error('Usage: gjs -m shared/presets.js <schemas-directory>');
         const source = Gio.SettingsSchemaSource.new_from_directory(schemaDirectory, Gio.SettingsSchemaSource.get_default(), false);
         const schema = source.lookup('org.gnome.shell.extensions.stealth-lock', false);
         if (!schema)
             throw new Error('Stealth Lock settings schema was not found');
         const settings = new Gio.Settings({settings_schema: schema});
-        if (!initializeEffectPresets(settings, {freshInstall: freshInstall === 'true'}))
+        if (!initializeEffectPresets(settings))
             throw new Error('Could not initialize saved effect presets');
         Gio.Settings.sync();
     }

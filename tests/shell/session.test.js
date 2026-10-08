@@ -145,7 +145,7 @@ export const tests = {
         extension.lock();
         await waitFor(() => extension._session?._ready, 'Ready');
         const session = extension._session;
-        session._cleanup.push({release() { throw new Error('test cleanup failure'); }});
+        session._cleanup.push(() => { throw new Error('test cleanup failure'); });
         session.close();
         session.close();
         equal(Main.modalCount, modals, 'Native grab released exactly once');

@@ -53,13 +53,6 @@
         "hidden" (hide cursor completely).
       </description>
     </key>
-    <key name="lock-cursor" type="b">
-      <default>true</default>
-      <summary>Lock Cursor (Legacy)</summary>
-      <description>
-        Legacy setting retained for migration compatibility with older versions.
-      </description>
-    </key>
     <key name="cursor-bitmap-path" type="s">
       <default>''</default>
       <summary>Cursor Bitmap Path</summary>
@@ -190,7 +183,7 @@
     <key name="visual-effect-presets" type="s">
       <default>'[]'</default>
       <summary>Saved Visual Effects</summary>
-      <description>JSON array of ordinary saved effect entries, each containing a name and JSON configuration in code. Starter entries are created once for fresh installations and can be edited or removed.</description>
+      <description>JSON array of ordinary saved effect entries, each containing a name and JSON configuration in code. Starter entries are created once per settings profile and can be edited or removed.</description>
     </key>
     <key name="visual-effect-active" type="s">
       <default>''</default>
@@ -200,17 +193,7 @@
     <key name="visual-effect-initialized" type="b">
       <default>false</default>
       <summary>Visual Effects Initialized</summary>
-      <description>Records first-install library initialization so edited or deleted starter entries are never restored during updates.</description>
-    </key>
-    <key name="normal-prompt-custom-js" type="s">
-      <default>''</default>
-      <summary>Normal Prompt Custom JS</summary>
-      <description>Retired setting. Existing JavaScript is retained for export but is never executed.</description>
-    </key>
-    <key name="normal-prompt-custom-js-saved-entries" type="s">
-      <default>'[]'</default>
-      <summary>Normal Prompt Custom JS Saved Entries</summary>
-      <description>Retired saved JavaScript library. Existing entries are retained for export but are never executed.</description>
+      <description>Records library initialization so edited or deleted starter entries are never reseeded.</description>
     </key>
     <key name="debug-show-info" type="b">
       <default>true</default>
@@ -221,14 +204,6 @@
       <default>false</default>
       <summary>Use Lock Hotkey for Abort</summary>
       <description>Use the activation shortcut as the emergency GNOME lock shortcut while the privacy screen is active.</description>
-    </key>
-    <key name="debug-abort-hotkey-custom" type="as">
-      <default>['&lt;Control&gt;&lt;Alt&gt;&lt;Shift&gt;u']</default>
-      <summary>Debug Abort Hotkey (Custom)</summary>
-      <description>
-        Stores the user-defined Debug Abort Hotkey when "Use Lock Hotkey for Abort" is enabled.
-        When the option is disabled, this value is restored back to Debug Abort Hotkey.
-      </description>
     </key>
   </schema>
 </schemalist>

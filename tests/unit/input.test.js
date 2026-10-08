@@ -6,6 +6,17 @@ import {loadModule} from './harness.js';
 async function runtime({stealth = false, attached = true} = {}) {
     const events = [];
     const callbacks = new Map();
+    const lockdown = {disable_show_password: false};
+    const peekChild = {};
+    const peek = {contains: source => source === peekChild};
+    const Clutter = {
+        EVENT_PROPAGATE: false, EVENT_STOP: true,
+        EventType: {KEY_PRESS: 1, KEY_RELEASE: 2, IM_COMMIT: 3, IM_DELETE: 4, IM_PREEDIT: 5,
+            BUTTON_PRESS: 6, BUTTON_RELEASE: 7, SCROLL: 8},
+        ModifierType: {CONTROL_MASK: 1, MOD1_MASK: 2, SHIFT_MASK: 4, SUPER_MASK: 8, META_MASK: 16},
+        KEY_r: 114, KEY_R: 82, KEY_u: 117, KEY_U: 85, KEY_Insert: 1000,
+        KEY_Super_L: 1001, KEY_Super_R: 1002, KEY_Meta_L: 1003, KEY_Meta_R: 1004,
+    };
     let actor;
     const stage = {
         focus: null,
@@ -58,6 +69,7 @@ async function runtime({stealth = false, attached = true} = {}) {
         }
         set_size(width, height) { this.size = [width, height]; }
         get_stage() { return attached ? stage : null; }
+        get_secondary_icon() { return this.properties.show_peek_icon ? peek : null; }
         contains(other) { return other === this.clutter_text; }
         grab_key_focus() {
             events.push(['refocus', this.text, this.password_visible]);
@@ -70,13 +82,21 @@ async function runtime({stealth = false, attached = true} = {}) {
             this.destroyed = true;
         }
     }
-    const {PasswordInput} = await loadModule('input.js', {'gi://St': {default: {PasswordEntry: Entry}}});
+    const {PasswordInput} = await loadModule('shell/input.js', {
+        'gi://Clutter': {default: Clutter},
+        'gi://St': {default: {PasswordEntry: Entry, Settings: {get: () => lockdown}}},
+    });
     const input = new PasswordInput({
         stealth,
         onSubmit: () => events.push('submit'),
         onActivity: () => events.push('activity'),
     });
-    return {input, actor, stage, events, callbacks};
+    return {input, actor, stage, events, callbacks, lockdown, peek, peekChild, Clutter,
+        key: (key, modifiers = 0, unicode = key) => ({
+            type: () => Clutter.EventType.KEY_PRESS, get_key_symbol: () => key,
+            get_state: () => modifiers, get_key_unicode: () => unicode,
+        }),
+    };
 }
 
 test('constructs a native password entry with separate stealth and normal presentation', async () => {
@@ -194,4 +214,73 @@ test('destroy disconnects entry signals before discarding credentials and destro
     assert.equal(events.filter(event => event === 'activity').length, 1);
     assert.ok(events.indexOf('activity') < events.indexOf('actor-destroy'));
     assert.equal(events.filter(event => event === 'actor-destroy').length, 1);
+});
+
+test('reveal shortcut follows input mode and live native reveal policy', async t => {
+    for (const stealth of [false, true]) {
+        await t.test(stealth ? 'stealth' : 'normal', async () => {
+            const {input, actor, lockdown, key, Clutter} = await runtime({stealth});
+            const reveal = key(Clutter.KEY_r, Clutter.ModifierType.CONTROL_MASK);
+            assert.equal(input.handleEvent(reveal), Clutter.EVENT_STOP);
+            assert.equal(actor.password_visible, !stealth);
+            actor.password_visible = false;
+            lockdown.disable_show_password = true;
+            assert.equal(input.handleEvent(reveal), Clutter.EVENT_STOP);
+            assert.equal(actor.password_visible, false);
+            lockdown.disable_show_password = false;
+            input.handleEvent(key(Clutter.KEY_R, Clutter.ModifierType.CONTROL_MASK));
+            assert.equal(actor.password_visible, !stealth);
+        });
+    }
+});
+
+test('Ctrl+U clears committed and composing input without exposing it', async () => {
+    const {input, actor, stage, key, Clutter} = await runtime();
+    actor.text = 'secret';
+    actor.preedit = 'pending';
+    actor.password_visible = true;
+    stage.focus = actor.clutter_text;
+    assert.equal(input.handleEvent(key(Clutter.KEY_u, Clutter.ModifierType.CONTROL_MASK)), Clutter.EVENT_STOP);
+    assert.equal(actor.text, '');
+    assert.equal(actor.preedit, '');
+    assert.equal(actor.password_visible, false);
+    assert.equal(stage.focus, actor.clutter_text);
+});
+
+test('native text editing and IME propagate while paste and desktop shortcuts are blocked', async () => {
+    const {input, actor, stage, key, Clutter} = await runtime();
+    const modifiers = Clutter.ModifierType;
+    for (const event of [key(118, modifiers.CONTROL_MASK), key(Clutter.KEY_Insert, modifiers.SHIFT_MASK),
+        key(Clutter.KEY_Super_L), key(120, modifiers.SUPER_MASK), key(120, modifiers.META_MASK),
+        key(1005, modifiers.MOD1_MASK, 0)])
+        assert.equal(input.handleEvent(event), Clutter.EVENT_STOP);
+    assert.equal(stage.focus, null);
+    for (const event of [key(97), key(8), key(13), key(233, modifiers.MOD1_MASK)])
+        assert.equal(input.handleEvent(event), Clutter.EVENT_PROPAGATE);
+    assert.equal(stage.focus, actor.clutter_text);
+    for (const type of [Clutter.EventType.IM_COMMIT, Clutter.EventType.IM_DELETE, Clutter.EventType.IM_PREEDIT])
+        assert.equal(input.handleEvent({type: () => type}), Clutter.EVENT_PROPAGATE);
+    for (const key of [Clutter.KEY_Super_L, Clutter.KEY_Super_R, Clutter.KEY_Meta_L, Clutter.KEY_Meta_R])
+        assert.equal(input.handleEvent({type: () => Clutter.EventType.KEY_RELEASE, get_key_symbol: () => key}), Clutter.EVENT_STOP);
+    assert.equal(input.handleEvent({type: () => Clutter.EventType.KEY_RELEASE, get_key_symbol: () => 97}), Clutter.EVENT_PROPAGATE);
+});
+
+test('pointer permission is limited to the native reveal icon and its children', async t => {
+    for (const stealth of [false, true]) {
+        await t.test(stealth ? 'stealth' : 'normal', async () => {
+            const {input, lockdown, peek, peekChild, Clutter} = await runtime({stealth});
+            for (const type of [Clutter.EventType.BUTTON_PRESS, Clutter.EventType.BUTTON_RELEASE]) {
+                for (const source of [peek, peekChild, {}, null]) {
+                    const event = {type: () => type, get_button: () => 1, get_source: () => source};
+                    assert.equal(input.handleEvent(event), !stealth && [peek, peekChild].includes(source)
+                        ? Clutter.EVENT_PROPAGATE : Clutter.EVENT_STOP);
+                    lockdown.disable_show_password = true;
+                    assert.equal(input.handleEvent(event), Clutter.EVENT_STOP);
+                    lockdown.disable_show_password = false;
+                }
+                assert.equal(input.handleEvent({type: () => type, get_button: () => 2, get_source: () => peek}), Clutter.EVENT_STOP);
+            }
+            assert.equal(input.handleEvent({type: () => Clutter.EventType.SCROLL}), Clutter.EVENT_STOP);
+        });
+    }
 });

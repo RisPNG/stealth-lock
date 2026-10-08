@@ -93,13 +93,4 @@ export const tests = {
             desktop.set_string('color-scheme', scheme);
         }
     },
-
-    async 'legacy executable style text is retained without executing in Shell'({extension, settings}) {
-        const code = 'global.stealthLockLegacyExecuted = true;';
-        settings.set_string('normal-prompt-custom-js', code);
-        settings.set_string('normal-prompt-custom-js-saved-entries', JSON.stringify([{name: 'retained', code}]));
-        await protect(extension);
-        equal(global.stealthLockLegacyExecuted, undefined, 'Legacy code never executed');
-        equal(settings.get_string('normal-prompt-custom-js'), code, 'Legacy source retained');
-    },
 };

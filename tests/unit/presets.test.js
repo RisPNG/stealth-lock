@@ -1,13 +1,12 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import {DEFAULT_EFFECT_PRESETS, initializeEffectPresets, readEffectPresets, validateEffectConfig} from '../../presets.js';
+import {DEFAULT_EFFECT_PRESETS, initializeEffectPresets, readSavedEntries, validateEffectConfig} from '../../shared/presets.js';
 
 function settingsFixture(values = {}, {refuseLibrary = false, refuseMarker = false} = {}) {
     const saved = new Map(Object.entries(values));
     const writes = [];
     const settings = {
-        settings_schema: {list_keys: () => ['lock-hotkey', 'normal-prompt-css', 'visual-effect-presets', 'visual-effect-active', 'visual-effect-initialized']},
         get_user_value: key => saved.has(key) ? saved.get(key) : null,
         get_boolean: key => saved.get(key) ?? false,
         get_string: key => saved.get(key) ?? (key === 'visual-effect-presets' ? '[]' : ''),
@@ -32,11 +31,11 @@ function settingsFixture(values = {}, {refuseLibrary = false, refuseMarker = fal
 test('fresh profile seeds three ordinary inactive presets once, and deletion survives reload', () => {
     const {settings, saved, writes} = settingsFixture();
     assert.equal(initializeEffectPresets(settings), true);
-    assert.deepEqual(readEffectPresets(settings), DEFAULT_EFFECT_PRESETS);
+    assert.deepEqual(readSavedEntries(settings, 'visual-effect-presets'), DEFAULT_EFFECT_PRESETS);
     assert.equal(saved.get('visual-effect-initialized'), true);
     assert.equal(settings.get_string('visual-effect-active'), '');
     assert.equal(saved.has('visual-effect-active'), false);
-    for (const entry of readEffectPresets(settings)) {
+    for (const entry of readSavedEntries(settings, 'visual-effect-presets')) {
         const config = validateEffectConfig(entry.code);
         assert.equal(config.knobs.clock.visible, config.effect === 'city-grow');
     }
@@ -50,29 +49,28 @@ test('fresh profile seeds three ordinary inactive presets once, and deletion sur
 test('existing empty, edited, and malformed user libraries are preserved even without an initialization marker', () => {
     for (const library of ['[]', '[{"name":"My effect","code":"editable draft"}]', '{invalid json']) {
         const {settings, writes} = settingsFixture({'visual-effect-presets': library});
-        assert.equal(initializeEffectPresets(settings, {freshInstall: true}), true);
+        assert.equal(initializeEffectPresets(settings), true);
         assert.equal(settings.get_string('visual-effect-presets'), library);
         assert.deepEqual(writes, [['visual-effect-initialized', true]]);
     }
 });
 
-test('explicit upgrade and implicit legacy profile never receive new starters', () => {
-    for (const [values, options] of [[{}, {freshInstall: false}], [{'lock-hotkey': ['custom']}, undefined]]) {
-        const {settings, writes} = settingsFixture(values);
-        assert.equal(initializeEffectPresets(settings, options), true);
-        assert.equal(settings.get_string('visual-effect-presets'), '[]');
-        assert.deepEqual(writes, [['visual-effect-initialized', true]]);
-    }
+test('customized current preferences do not prevent first-time starter initialization', () => {
+    const {settings, saved} = settingsFixture({'lock-hotkey': ['custom'], 'normal-prompt-css': 'padding: 9px;'});
+    assert.equal(initializeEffectPresets(settings), true);
+    assert.deepEqual(readSavedEntries(settings, 'visual-effect-presets'), DEFAULT_EFFECT_PRESETS);
+    assert.deepEqual(saved.get('lock-hotkey'), ['custom']);
+    assert.equal(saved.get('normal-prompt-css'), 'padding: 9px;');
 });
 
-test('explicit fresh install overrides legacy detection while retaining an explicit active selection', () => {
-    const fresh = settingsFixture({'lock-hotkey': ['custom']});
-    assert.equal(initializeEffectPresets(fresh.settings, {freshInstall: true}), true);
-    assert.equal(readEffectPresets(fresh.settings).length, 3);
-    const selected = settingsFixture({'visual-effect-active': ''});
-    assert.equal(initializeEffectPresets(selected.settings, {freshInstall: true}), true);
-    assert.equal(selected.settings.get_string('visual-effect-presets'), '[]');
-    assert.deepEqual(selected.writes, [['visual-effect-initialized', true]]);
+test('explicit current effect selections remain unchanged before first initialization', () => {
+    for (const active of ['', 'My Rain']) {
+        const {settings, writes} = settingsFixture({'visual-effect-active': active});
+        assert.equal(initializeEffectPresets(settings), true);
+        assert.equal(settings.get_string('visual-effect-presets'), '[]');
+        assert.equal(settings.get_string('visual-effect-active'), active);
+        assert.deepEqual(writes, [['visual-effect-initialized', true]]);
+    }
 });
 
 test('failed seed never writes the marker and a failed marker never replaces successful saved data', () => {
@@ -89,18 +87,27 @@ test('failed seed never writes the marker and a failed marker never replaces suc
     assert.deepEqual(marker.writes, [['visual-effect-initialized', true]]);
 });
 
-test('library validation rejects malformed records and ambiguous names without modifying settings', () => {
-    for (const raw of ['not JSON', '{}', '[null]', '[[]]', '[{"name":1,"code":"{}"}]',
-        '[{"name":"  ","code":"{}"}]', '[{"name":"Valid","code":3}]',
-        '[{"name":"Valid","code":"{}","script":"x"}]',
-        '[{"name":"Rain","code":"{}"},{"name":" rain ","code":"{}"}]']) {
-        const {settings, writes} = settingsFixture({'visual-effect-presets': raw});
-        assert.throws(() => readEffectPresets(settings));
-        assert.equal(settings.get_string('visual-effect-presets'), raw);
-        assert.deepEqual(writes, []);
+test('saved-entry validation rejects malformed CSS and effect libraries without modifying settings', () => {
+    for (const key of ['normal-prompt-css-saved-entries', 'visual-effect-presets']) {
+        for (const raw of ['not JSON', '{}', '[null]', '[[]]', '[{"name":1,"code":"{}"}]',
+            '[{"name":"  ","code":"{}"}]', '[{"name":"Valid","code":3}]',
+            '[{"name":"Valid","code":"{}","extra":"x"}]',
+            '[{"name":"Rain","code":"{}"},{"name":" rain ","code":"{}"}]']) {
+            const {settings, writes} = settingsFixture({[key]: raw});
+            assert.throws(() => readSavedEntries(settings, key), /Saved entr|saved entry/);
+            assert.equal(settings.get_string(key), raw);
+            assert.deepEqual(writes, []);
+        }
     }
     const editable = settingsFixture({'visual-effect-presets': '[{"name":" Mine ","code":"invalid configuration draft"}]'});
-    assert.deepEqual(readEffectPresets(editable.settings), [{name: ' Mine ', code: 'invalid configuration draft'}]);
+    assert.deepEqual(readSavedEntries(editable.settings, 'visual-effect-presets'), [{name: ' Mine ', code: 'invalid configuration draft'}]);
+});
+
+test('saved CSS entries retain exact names and editable code through the shared reader', () => {
+    const entries = [{name: ' Spacious ', code: 'padding: 9px;'}, {name: 'Draft', code: ''}];
+    const {settings, writes} = settingsFixture({'normal-prompt-css-saved-entries': JSON.stringify(entries)});
+    assert.deepEqual(readSavedEntries(settings, 'normal-prompt-css-saved-entries'), entries);
+    assert.deepEqual(writes, []);
 });
 
 test('normalization fills effect and clock defaults without selecting or executing scripts', () => {

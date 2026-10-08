@@ -1,10 +1,10 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import {readEffectPresets, validateEffectConfig} from '../../presets.js';
+import {readSavedEntries, validateEffectConfig} from '../../shared/presets.js';
 import {loadModule} from './harness.js';
 
-async function runtime({radiusProperty = true, animations = true, failure = '', clockSize = [240, 80],
+async function runtime({radiusProperty = true, animations = true, reducedMotion = null, failure = '', clockSize = [240, 80],
     monitors = [{x: 0, y: 0, width: 1024, height: 768}], promptMonitor = ''} = {}) {
     const actors = [];
     const surfaces = [];
@@ -20,17 +20,33 @@ async function runtime({radiusProperty = true, animations = true, failure = '', 
     const theme = {red: 32, green: 64, blue: 96, alpha: 255};
     const interfaceSettings = {
         enable_animations: animations,
+        reduced_motion: reducedMotion ? 1 : 0,
         owners: new Map(),
         connectObject(signal, callback, owner) {
             if (faults.failure === 'settings-connect')
                 throw new Error('settings connection failed');
-            this.owners.set(owner, {signal, callback});
+            const connections = this.owners.get(owner) ?? [];
+            connections.push({signal, callback});
+            this.owners.set(owner, connections);
         },
         disconnectObject(owner) { this.owners.delete(owner); },
         toggle(value) {
             this.enable_animations = value;
-            for (const {callback} of this.owners.values())
-                callback();
+            for (const connections of this.owners.values()) {
+                for (const {signal, callback} of connections) {
+                    if (signal === 'notify::enable-animations')
+                        callback();
+                }
+            }
+        },
+        setReducedMotion(value) {
+            this.reduced_motion = value ? 1 : 0;
+            for (const connections of this.owners.values()) {
+                for (const {signal, callback} of connections) {
+                    if (signal === 'notify::reduced-motion')
+                        callback();
+                }
+            }
         },
     };
     class Actor {
@@ -39,6 +55,7 @@ async function runtime({radiusProperty = true, animations = true, failure = '', 
             this.children = [];
             this.handlers = new Map();
             this.effects = new Map();
+            this.layout_manager = {set_orientation: orientation => { this.orientation = orientation; }};
             actors.push(this);
         }
         add_child(actor) { this.children.push(actor); actor.parent = this; }
@@ -133,9 +150,9 @@ async function runtime({radiusProperty = true, animations = true, failure = '', 
             return {format: format => format};
         }},
     };
-    const {BackdropEffect} = await loadModule('effects.js', {
+    const {BackdropEffect} = await loadModule('shell/effects/backdrop.js', {
         cairo: {default: {ImageSurface, Context, Format: {ARGB32: 0}, Operator: {DEST_OUT: 1, OVER: 2, SOURCE: 3}}},
-        'gi://Clutter': {default: {ActorAlign: {CENTER: 0}}},
+        'gi://Clutter': {default: {ActorAlign: {CENTER: 0}, Orientation: {VERTICAL: 1}}},
         'gi://GLib': {default: GLib},
         'gi://Pango': {default: {SCALE: 1024, FontDescription: class { set_family() {} set_absolute_size() {} }}},
         'gi://PangoCairo': {default: {
@@ -143,7 +160,9 @@ async function runtime({radiusProperty = true, animations = true, failure = '', 
             show_layout() {},
         }},
         'gi://Shell': {default: {BlurEffect, BlurMode: {BACKGROUND: 1}}},
-        'gi://St': {default: {Widget: Actor, DrawingArea: Actor, BoxLayout: Actor, Label: Actor, Settings: {get: () => interfaceSettings}}},
+        'gi://St': {default: {Widget: Actor, DrawingArea: Actor, BoxLayout: Actor, Label: Actor,
+            ReducedMotion: reducedMotion === null ? undefined : {NO_PREFERENCE: 0, REDUCE: 1},
+            Settings: {get: () => interfaceSettings}}},
         './city.js': {CityGrowth},
     }, {effectMarker: marker, Math: Object.assign(Object.create(Math), {random: () => 0.25}), console: {debug() {}}});
     const parent = new Actor();
@@ -163,7 +182,7 @@ async function runtime({radiusProperty = true, animations = true, failure = '', 
 
 test('both Shell blur properties receive valid native parameters and detach during destruction', async t => {
     for (const radiusProperty of [false, true]) {
-        await t.test(radiusProperty ? 'Shell46–48 radius' : 'Shell45 sigma', async () => {
+        await t.test(radiusProperty ? 'Shell46–51 radius' : 'Shell45 sigma', async () => {
             const state = await runtime({radiusProperty});
             const effect = state.create('blur', {radius: 12.6, brightness: 0.4});
             const properties = state.blurProperties[0];
@@ -198,6 +217,8 @@ test('animation preference changes own exactly one animation source and preserve
     assert.equal(state.timers.size, 2);
     assert.equal(effect.timeLabel.text, '%I:%M %p');
     assert.equal(effect.dateLabel, undefined);
+    assert.equal(effect.clock.orientation, 1);
+    assert.equal(Object.hasOwn(effect.clock, 'vertical'), false);
     const animation = [...state.timers.values()].find(timer => timer.kind === 'animation');
     assert.equal(animation.interval, 80);
     animation.callback();
@@ -220,6 +241,27 @@ test('reduced motion creates a static scene without scheduling animation frames'
     assert.equal(state.timers.size, 0);
     assert.equal(effect.area.repaints, 1);
     effect.destroy();
+});
+
+test('GNOME51 reduced motion independently overrides enabled animations and reacts live', async () => {
+    const state = await runtime({reducedMotion: true});
+    const effect = state.create('city-grow', {clock: {visible: true}});
+    assert.equal(state.scenes[0].advances, 32);
+    assert.deepEqual([...state.timers.values()].map(timer => timer.kind), ['clock']);
+    state.interfaceSettings.setReducedMotion(false);
+    assert.equal(state.timers.size, 2);
+    state.interfaceSettings.setReducedMotion(true);
+    assert.deepEqual([...state.timers.values()].map(timer => timer.kind), ['clock']);
+    state.interfaceSettings.toggle(false);
+    state.interfaceSettings.setReducedMotion(false);
+    assert.deepEqual([...state.timers.values()].map(timer => timer.kind), ['clock']);
+    state.interfaceSettings.toggle(true);
+    assert.equal(state.timers.size, 2);
+    effect.destroy();
+    state.interfaceSettings.setReducedMotion(false);
+    state.interfaceSettings.toggle(true);
+    assert.equal(state.timers.size, 0);
+    assert.equal(state.interfaceSettings.owners.size, 0);
 });
 
 test('theme changes replace the scene and dispose old resources before the next frame', async () => {
@@ -365,12 +407,12 @@ test('overlay effect replacement preserves modal input and places decoration bel
             this.context.parent.children.splice(this.context.parent.children.indexOf(this.layer), 1);
         }
     }
-    const {LockOverlay} = await loadModule('overlay.js', {
+    const {LockOverlay} = await loadModule('shell/overlay.js', {
         'gi://Clutter': {default: {}}, 'gi://Cogl': {default: {}}, 'gi://GdkPixbuf': {default: {}},
         'gi://Gio': {default: {}}, 'gi://GLib': {default: {}}, 'gi://Meta': {default: {}},
         'gi://Pango': {default: {}}, 'gi://St': {default: {}},
         'resource:///org/gnome/shell/ui/main.js': {layoutManager: {primaryMonitor: monitor}},
-        './effects.js': {BackdropEffect: Renderer}, './presets.js': {readEffectPresets, validateEffectConfig},
+        './effects/backdrop.js': {BackdropEffect: Renderer}, '../shared/presets.js': {readSavedEntries, validateEffectConfig},
     }, {effectMarker: marker, console: {debug() {}}});
     const values = {
         'visual-effect-active': 'Mine',

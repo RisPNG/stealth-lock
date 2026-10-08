@@ -2,7 +2,7 @@
     "name": "Stealth Lock",
     "description": "Password-protected privacy screen over your desktop, with in-memory display freezing, media pause and configurable cursor. Use GNOME's native lock for session security.",
     "uuid": "stealth-lock@user",
-    "shell-version": ["45", "46", "47", "48"],
+    "shell-version": ["45", "46", "47", "48", "49", "50", "51"],
     "session-modes": ["user", "unlock-dialog"],
     "version": 10,
     "version-name": "1.0.1",

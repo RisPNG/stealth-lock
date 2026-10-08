@@ -2,7 +2,7 @@ import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
 import {exit} from 'system';
 
-import {Authentication} from '../authentication.js';
+import {Authentication} from '../shell/authentication.js';
 
 function assert(condition, message) {
     if (!condition)
@@ -46,13 +46,15 @@ function processGone(pid) {
 }
 
 const directory = Gio.File.new_for_path(GLib.dir_make_tmp('stealth-lock-auth-test-XXXXXX'));
+const helpers = directory.get_child('helpers');
 let total = 0;
 let failed = 0;
 try {
+    helpers.make_directory(null);
     const fixture = Gio.File.new_for_uri(import.meta.url).get_parent().get_child('auth').get_child('fake_authentication.py');
     const [, fixtureBytes] = fixture.load_contents(null);
     assert(new TextDecoder().decode(fixtureBytes).includes('FAKE_AUTHENTICATION_ONLY'), 'Refusing a non-fixture authentication helper');
-    fixture.copy(directory.get_child('authentication.py'), Gio.FileCopyFlags.NONE, null, null);
+    fixture.copy(helpers.get_child('authentication.py'), Gio.FileCopyFlags.NONE, null, null);
 
     const tests = {
         async 'native stdin transport preserves Unicode and isolated interpreter flags'() {
@@ -183,12 +185,23 @@ try {
             console.error(`not ok ${total} - ${title}: ${error.message}\n${error.stack}`);
         }
     }
-    assert(!directory.get_child('__pycache__').query_exists(null), 'Isolated helper wrote bytecode');
+    assert(!helpers.get_child('__pycache__').query_exists(null), 'Isolated helper wrote bytecode');
 } finally {
     const files = directory.enumerate_children('standard::name', Gio.FileQueryInfoFlags.NONE, null);
     try {
-        for (let info = files.next_file(null); info; info = files.next_file(null))
-            directory.get_child(info.get_name()).delete(null);
+        for (let info = files.next_file(null); info; info = files.next_file(null)) {
+            const file = directory.get_child(info.get_name());
+            if (info.get_name() === 'helpers') {
+                const helperFiles = file.enumerate_children('standard::name', Gio.FileQueryInfoFlags.NONE, null);
+                try {
+                    for (let helperInfo = helperFiles.next_file(null); helperInfo; helperInfo = helperFiles.next_file(null))
+                        file.get_child(helperInfo.get_name()).delete(null);
+                } finally {
+                    helperFiles.close(null);
+                }
+            }
+            file.delete(null);
+        }
     } finally {
         files.close(null);
         directory.delete(null);

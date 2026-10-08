@@ -62,7 +62,7 @@ async function createScreenshotFixture(t, {startupError = null} = {}) {
         assert.equal(timers.size, 0, 'capture left a timeout behind');
         assert.equal(cancellable.handlers.size, 0, 'capture left a cancellation handler behind');
     });
-    const {captureScreenshot} = await loadModule('screenshot.js', {
+    const {captureScreenshot} = await loadModule('shell/screenshot.js', {
         'gi://Gio': {default: Gio},
         'gi://GLib': {default: GLib},
         'gi://Shell': {default: Shell},

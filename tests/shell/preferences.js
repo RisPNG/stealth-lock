@@ -56,7 +56,6 @@ try {
     const starters = JSON.parse(settings.get_string('visual-effect-presets'));
     assert(starters.length === 3 && new Set(starters.map(entry => JSON.parse(entry.code).effect)).size === 3, 'Fresh profile seeds three ordinary effect entries');
     assert(settings.get_boolean('visual-effect-initialized') && settings.get_string('visual-effect-active') === '', 'Starter effects initialize once and remain inactive');
-    settings.set_string('normal-prompt-custom-js', 'throw new Error("legacy code must never execute")');
     window.present();
     await waitFor(() => window.is_active, 'Actual Extensions preferences window gains native focus');
     for (const [title, key] of [
@@ -115,14 +114,19 @@ try {
     assert(anchor.sensitive, 'Follow cursor controls did not become sensitive');
     const debug = findWidget(window, widget => widget instanceof Adw.SwitchRow && widget.title === 'Enable Debug Mode');
     const useActivation = findWidget(window, widget => widget instanceof Adw.SwitchRow && widget.title === 'Abort Hotkey = Activation Hotkey');
+    const abort = findWidget(window, widget => widget instanceof Adw.ActionRow && widget.title === 'Abort Hotkey (Debug)');
+    const abortLabel = findWidget(abort, widget => widget instanceof Gtk.ShortcutLabel);
     debug.active = true;
     const custom = settings.get_strv('debug-abort-hotkey')[0];
     useActivation.active = true;
+    assert(settings.get_strv('debug-abort-hotkey')[0] === custom, 'Sharing activation preserves the stored custom abort shortcut');
+    assert(abortLabel.accelerator === settings.get_strv('lock-hotkey')[0], 'Shared abort label shows the activation shortcut');
     settings.set_strv('lock-hotkey', ['<Super><Control>k']);
-    assert(settings.get_strv('debug-abort-hotkey')[0] === '<Super><Control>k', 'Matching abort shortcut did not follow activation');
+    assert(settings.get_strv('debug-abort-hotkey')[0] === custom, 'Changing activation leaves the stored custom abort shortcut unchanged');
+    assert(abortLabel.accelerator === '<Super><Control>k', 'Shared abort label follows activation changes');
     useActivation.active = false;
-    assert(settings.get_strv('debug-abort-hotkey')[0] === custom, 'Custom abort shortcut was not restored');
-    assert(settings.get_string('normal-prompt-custom-js').includes('legacy code'), 'Legacy JavaScript was modified');
+    assert(settings.get_strv('debug-abort-hotkey')[0] === custom, 'Disabling sharing preserves the stored custom abort shortcut');
+    assert(abortLabel.accelerator === custom, 'Disabling sharing displays the custom abort shortcut');
     preferences._showShortcutEditor(window, settings, 'lock-hotkey');
     for (const dialog of preferences._dialogs)
         dialog.response(Gtk.ResponseType.CANCEL);
@@ -217,8 +221,8 @@ try {
         findWidget(effectDialog, widget => widget instanceof Gtk.Button && widget.label === 'Delete').emit('clicked');
     effectDialog.response(Gtk.ResponseType.CANCEL);
     assert(settings.get_string('visual-effect-presets') === '[]' && effectRow.model.get_n_items() === 1, 'All starter entries can be deleted from the ordinary library');
-    const {initializeEffectPresets} = await import(dir.get_child('presets.js').get_uri());
-    initializeEffectPresets(settings, {freshInstall: true});
+    const {initializeEffectPresets} = await import(dir.resolve_relative_path('shared/presets.js').get_uri());
+    initializeEffectPresets(settings);
     assert(settings.get_string('visual-effect-presets') === '[]', 'Deleted library remains empty when initialized again');
     window.close();
     assert(preferences._cancellable.is_cancelled() && preferences._dialogs.size === 0, 'Preferences close releases resources');

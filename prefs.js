@@ -5,7 +5,7 @@ import GLib from 'gi://GLib';
 import Gtk from 'gi://Gtk';
 
 import {ExtensionPreferences, gettext as _} from 'resource:///org/gnome/Shell/Extensions/js/extensions/prefs.js';
-import {initializeEffectPresets, readEffectPresets, validateEffectConfig} from './presets.js';
+import {initializeEffectPresets, readSavedEntries, validateEffectConfig} from './shared/presets.js';
 
 export default class StealthLockPreferences extends ExtensionPreferences {
     fillPreferencesWindow(window) {
@@ -57,10 +57,11 @@ export default class StealthLockPreferences extends ExtensionPreferences {
             settings.bind(key, row, 'active', Gio.SettingsBindFlags.DEFAULT);
             features.add(row);
         }
+        const [, [autoResetLower, autoResetUpper]] = settings.settings_schema.get_key('auto-reset-seconds').get_range().recursiveUnpack();
         const autoReset = new Adw.SpinRow({
             title: _('Auto Reset (seconds)'),
             subtitle: _('Clear the password after inactivity; 0 disables the timer'),
-            adjustment: new Gtk.Adjustment({lower: 0, upper: 3600, step_increment: 1, page_increment: 10}),
+            adjustment: new Gtk.Adjustment({lower: autoResetLower, upper: autoResetUpper, step_increment: 1, page_increment: 10}),
         });
         settings.bind('auto-reset-seconds', autoReset, 'value', Gio.SettingsBindFlags.DEFAULT);
         features.add(autoReset);
@@ -72,11 +73,7 @@ export default class StealthLockPreferences extends ExtensionPreferences {
             ['normal-prompt-cursor-anchor', password, _('Cursor Anchor'), _('Place the prompt at this corner of the pointer'), [_('Bottom Right'), _('Top Right'), _('Top Left'), _('Bottom Left')]],
         ]) {
             const row = new Adw.ComboRow({title, subtitle, model: Gtk.StringList.new(labels), selected: settings.get_enum(key)});
-            row.connect('notify::selected', () => {
-                settings.set_enum(key, row.selected);
-                if (key === 'cursor-mode')
-                    settings.set_boolean('lock-cursor', row.selected === 0);
-            });
+            row.connect('notify::selected', () => settings.set_enum(key, row.selected));
             comboRows.set(key, {row});
             group.add(row);
         }
@@ -186,7 +183,7 @@ export default class StealthLockPreferences extends ExtensionPreferences {
         }
         let effectEntries = [];
         try {
-            effectEntries = readEffectPresets(settings);
+            effectEntries = readSavedEntries(settings, 'visual-effect-presets');
         } catch (error) {
             console.error('Stealth Lock: could not read visual effect presets', error);
         }
@@ -216,10 +213,6 @@ export default class StealthLockPreferences extends ExtensionPreferences {
             }
             settings.set_string('visual-effect-active', entry?.name ?? '');
         });
-        styles.add(new Adw.ActionRow({
-            title: _('Legacy JavaScript'),
-            subtitle: _('Previous scripts and saved entries remain in GSettings for export. They are ignored and are never executed.'),
-        }));
 
         const debugMode = new Adw.SwitchRow({title: _('Enable Debug Mode'), subtitle: _('Enable diagnostic logging and the abort shortcut')});
         const debugInfo = new Adw.SwitchRow({title: _('Show Debug Info'), subtitle: _('Show diagnostic status while the privacy screen is active')});
@@ -232,6 +225,8 @@ export default class StealthLockPreferences extends ExtensionPreferences {
             settings.bind(key, row, 'active', Gio.SettingsBindFlags.DEFAULT);
             debug.add(row);
         }
+        settings.bind('debug-mode', debugInfo, 'sensitive', Gio.SettingsBindFlags.GET | Gio.SettingsBindFlags.NO_SENSITIVITY);
+        settings.bind('debug-mode', useActivation, 'sensitive', Gio.SettingsBindFlags.GET | Gio.SettingsBindFlags.NO_SENSITIVITY);
         notes.add(new Adw.ActionRow({
             title: _('Privacy Screen'),
             subtitle: _('This extension blocks normal desktop input while active. Disabling it or restarting GNOME Shell can remove the overlay. Use the GNOME lock screen for session security.'),
@@ -241,23 +236,20 @@ export default class StealthLockPreferences extends ExtensionPreferences {
             subtitle: _('Unlock uses your login password. Passwords are not saved in settings or written to disk. Ctrl+Alt+Shift+L hands off to the GNOME lock screen.'),
         }));
 
-        const isNormal = settings.get_string('lock-type') === 'normal';
-        const follows = settings.get_boolean('normal-prompt-follow-cursor');
-        follow.sensitive = isNormal;
-        comboRows.get('normal-prompt-cursor-anchor').row.sensitive = isNormal && follows;
-        monitorRow.sensitive = isNormal && !follows;
-        for (const [key, row] of positionRows)
-            row.sensitive = isNormal && (key.includes('offset') ? follows : !follows);
-        debugInfo.sensitive = debugMode.active;
-        useActivation.sensitive = debugMode.active;
-        abortRow.sensitive = debugMode.active && !useActivation.active;
+        const conditionalControls = {
+            follow,
+            anchor: comboRows.get('normal-prompt-cursor-anchor').row,
+            monitor: monitorRow,
+            positions: positionRows,
+            abort: abortRow,
+        };
+        this._updateControlAvailability(settings, conditionalControls);
         shortcutLabels.get('debug-abort-hotkey').accelerator = settings.get_strv(useActivation.active ? 'lock-hotkey' : 'debug-abort-hotkey')[0] ?? '';
 
-        let previousUseActivation = useActivation.active;
         const settingsId = settings.connect('changed', (_settings, key) => {
             if (key === 'visual-effect-presets' || key === 'visual-effect-active') {
                 try {
-                    effectEntries = readEffectPresets(settings);
+                    effectEntries = readSavedEntries(settings, 'visual-effect-presets');
                 } catch (error) {
                     console.error('Stealth Lock: could not read visual effect presets', error);
                     effectEntries = [];
@@ -266,19 +258,6 @@ export default class StealthLockPreferences extends ExtensionPreferences {
                 effectNames.splice(0, effectNames.get_n_items(), [_('None'), ...effectEntries.map(entry => entry.name)]);
                 effectRow.selected = Math.max(0, effectEntries.findIndex(entry => entry.name === settings.get_string('visual-effect-active')) + 1);
                 effectRow.unblock_signal_handler(effectSelectionId);
-            }
-            if (key === 'debug-abort-use-lock-hotkey' && previousUseActivation !== useActivation.active) {
-                previousUseActivation = useActivation.active;
-                if (useActivation.active) {
-                    settings.set_strv('debug-abort-hotkey-custom', settings.get_strv('debug-abort-hotkey'));
-                    settings.set_strv('debug-abort-hotkey', settings.get_strv('lock-hotkey'));
-                } else {
-                    settings.set_strv('debug-abort-hotkey', settings.get_strv('debug-abort-hotkey-custom'));
-                }
-            } else if (key === 'lock-hotkey' && useActivation.active) {
-                settings.set_strv('debug-abort-hotkey', settings.get_strv('lock-hotkey'));
-            } else if (key === 'debug-abort-hotkey' && !useActivation.active) {
-                settings.set_strv('debug-abort-hotkey-custom', settings.get_strv('debug-abort-hotkey'));
             }
             const combo = comboRows.get(key);
             if (combo)
@@ -293,16 +272,7 @@ export default class StealthLockPreferences extends ExtensionPreferences {
             shortcutLabels.get('lock-hotkey').accelerator = settings.get_strv('lock-hotkey')[0] ?? '';
             shortcutLabels.get('debug-abort-hotkey').accelerator = settings.get_strv(useActivation.active ? 'lock-hotkey' : 'debug-abort-hotkey')[0] ?? '';
             cursor.sensitive = settings.get_string('cursor-mode') === 'lock-icon';
-            const normal = settings.get_string('lock-type') === 'normal';
-            const following = settings.get_boolean('normal-prompt-follow-cursor');
-            follow.sensitive = normal;
-            comboRows.get('normal-prompt-cursor-anchor').row.sensitive = normal && following;
-            monitorRow.sensitive = normal && !following;
-            for (const [positionKey, row] of positionRows)
-                row.sensitive = normal && (positionKey.includes('offset') ? following : !following);
-            debugInfo.sensitive = settings.get_boolean('debug-mode');
-            useActivation.sensitive = settings.get_boolean('debug-mode');
-            abortRow.sensitive = settings.get_boolean('debug-mode') && !useActivation.active;
+            this._updateControlAvailability(settings, conditionalControls);
         });
         window.connect('close-request', () => {
             this._cancellable.cancel();
@@ -312,6 +282,17 @@ export default class StealthLockPreferences extends ExtensionPreferences {
             this._dialogs.clear();
             return false;
         });
+    }
+
+    _updateControlAvailability(settings, controls) {
+        const normal = settings.get_string('lock-type') === 'normal';
+        const following = settings.get_boolean('normal-prompt-follow-cursor');
+        controls.follow.sensitive = normal;
+        controls.anchor.sensitive = normal && following;
+        controls.monitor.sensitive = normal && !following;
+        for (const [key, row] of controls.positions)
+            row.sensitive = normal && (key.includes('offset') ? following : !following);
+        controls.abort.sensitive = settings.get_boolean('debug-mode') && !settings.get_boolean('debug-abort-use-lock-hotkey');
     }
 
     _showShortcutEditor(window, settings, key) {
@@ -379,14 +360,7 @@ export default class StealthLockPreferences extends ExtensionPreferences {
         let entries;
         let savedEntriesValid = true;
         try {
-            if (isEffect) {
-                entries = readEffectPresets(settings);
-            } else {
-                entries = JSON.parse(settings.get_string(entriesKey));
-                if (!Array.isArray(entries) || entries.some(entry => typeof entry?.name !== 'string' || !entry.name.trim() || typeof entry.code !== 'string'))
-                    throw new Error('Saved entries must be an array of names and code strings');
-                entries = entries.map(entry => ({name: entry.name.trim(), code: entry.code}));
-            }
+            entries = readSavedEntries(settings, entriesKey);
         } catch (error) {
             console.error('Stealth Lock: could not read saved entries', error);
             entries = [];

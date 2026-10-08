@@ -1,4 +1,4 @@
-"""Stand-in for the extension's authentication.py inside the headless test shell.
+"""Stand-in for the extension's helpers/authentication.py inside the headless test shell.
 
 run-shell.sh installs it over the real helper in its private copy of the extension, so the shell can never reach PAM,
 sudo, shadow or polkit. It reads all raw stdin bytes and compares them with SLH_PASSWORD.

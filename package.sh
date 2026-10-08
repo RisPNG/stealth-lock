@@ -26,21 +26,22 @@ trap 'rm -rf "$staging"' EXIT
 
 payload=(
     extension.js
-    lockSession.js
-    authentication.js
-    authentication.py
-    screenshot.js
-    overlay.js
-    shell.js
-    input.js
+    shell/lockSession.js
+    shell/authentication.js
+    helpers/authentication.py
+    shell/screenshot.js
+    shell/overlay.js
+    shell/integration.js
+    shell/media.js
+    shell/input.js
     prefs.js
-    presets.js
-    effects.js
-    city.js
+    shared/presets.js
+    shell/effects/backdrop.js
+    shell/effects/city.js
     metadata.json
     stylesheet.css
     schemas/org.gnome.shell.extensions.stealth-lock.gschema.xml
-    stylesheet-base.css
+    styles/stylesheet-base.css
     stylesheet-dark.css
     stylesheet-light.css
     LICENSE
@@ -48,20 +49,26 @@ payload=(
     LICENSES/GPL-3.0-only.txt
 )
 
+extras=()
+declare -A extra_paths=()
 for file in "${payload[@]}"; do
     mkdir -p "$staging/payload/$(dirname "$file")"
     cp "$script_dir/$file" "$staging/payload/$file"
     chmod 0644 "$staging/payload/$file"
+    case "$file" in
+        extension.js|prefs.js|metadata.json|stylesheet.css|schemas/*) ;;
+        *)
+            extra_path="${file%%/*}"
+            if [[ ! -v "extra_paths[$extra_path]" ]]; then
+                extras+=("--extra-source=$extra_path")
+                extra_paths[$extra_path]=1
+            fi
+            ;;
+    esac
 done
 
 glib-compile-schemas --strict --dry-run "$staging/payload/schemas"
-gnome-extensions pack --force --out-dir="$staging" \
-    --extra-source=lockSession.js --extra-source=authentication.js --extra-source=authentication.py \
-    --extra-source=screenshot.js --extra-source=overlay.js --extra-source=shell.js --extra-source=input.js \
-    --extra-source=presets.js --extra-source=effects.js --extra-source=city.js \
-    --extra-source=stylesheet-base.css --extra-source=stylesheet-dark.css --extra-source=stylesheet-light.css \
-    --extra-source=LICENSE --extra-source=REUSE.toml --extra-source=LICENSES \
-    "$staging/payload"
+gnome-extensions pack --force --out-dir="$staging" "${extras[@]}" "$staging/payload"
 /usr/bin/python3 - "$staging/$extension_uuid.shell-extension.zip" "${payload[@]}" <<'PY'
 import stat
 import sys

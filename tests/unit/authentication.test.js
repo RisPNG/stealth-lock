@@ -105,7 +105,7 @@ async function createAuthenticationFixture(t, {spawnError = null, finishOnKill =
         assert.equal(handlers.size, 0, 'authentication left a cancellation handler behind');
     });
 
-    const {Authentication} = await loadModule('authentication.js', {
+    const {Authentication} = await loadModule('shell/authentication.js', {
         'gi://Gio': {default: Gio},
         'gi://GLib': {default: GLib},
     }, {TextEncoder, console: {warn: message => warnings.push(message)}});
@@ -139,7 +139,7 @@ test('successful helper uses the pinned interpreter and private stdin, then rele
     const attempt = authentication.verify(password);
     assert.equal(authentication.busy, true);
     assert.equal(processes.length, 1);
-    assert.deepEqual(processes[0].argv, ['/usr/bin/python3', '-I', '-B', '/extension/path/authentication.py']);
+    assert.deepEqual(processes[0].argv, ['/usr/bin/python3', '-I', '-B', '/extension/path/helpers/authentication.py']);
     assert.equal(processes[0].flags, 7);
     assert.equal(processes[0].password, password);
     assert.equal(processes[0].token, cancellable);

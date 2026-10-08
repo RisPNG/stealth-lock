@@ -9,27 +9,37 @@ async function extensionRuntime({wasLocked = false, nativeLocked = false, debugM
     let nativeChange;
     let pendingRestore;
     const settings = {
-        get_user_value: () => null,
         get_boolean: key => key === 'debug-mode' && debugMode,
         get_strv: key => [key === 'lock-hotkey' ? '<Super><Control>l' : '<Control><Alt><Shift>u'],
         connectObject: () => {},
         disconnectObject: () => events.push('settings-disconnect'),
     };
     class Extension {
+        path = '/extension';
         getSettings() { return settings; }
     }
     class LockSession {
-        constructor(_extension, onClosed) {
+        constructor({settings: suppliedSettings, path, shortcuts, onClosed}) {
+            assert.equal(suppliedSettings, settings);
+            assert.equal(path, '/extension');
+            this.shortcuts = shortcuts;
             this.onClosed = onClosed;
-            this.cancellable = {cancel: () => events.push('cancel')};
-            this._nativeLock = false;
+            this.nativeLocked = false;
+            for (const key of ['_nativeLock', '_handoff', 'cancellable'])
+                Object.defineProperty(this, key, {get: () => assert.fail(`Extension must not inspect session ${key}`)});
         }
         start() { events.push('start'); }
-        handoff() {
-            events.push('handoff');
-            this._nativeLock = true;
+        systemLockChanged(locked) {
+            events.push(['native-change', locked]);
+            if (locked)
+                this.nativeLocked = true;
+            else if (this.nativeLocked)
+                this.close();
         }
-        nativeLockActivated() { this._nativeLock = true; }
+        disable() {
+            events.push('session-disable');
+            this.close({resumeMedia: false, clearState: false});
+        }
         close(options = {}) {
             events.push(['close', options]);
             if (options.clearState !== false)
@@ -56,9 +66,9 @@ async function extensionRuntime({wasLocked = false, nativeLocked = false, debugM
         'gi://Shell': {default: {ActionMode: {NORMAL: 1, OVERVIEW: 2, NONE: 0}}},
         'resource:///org/gnome/shell/ui/main.js': Main,
         'resource:///org/gnome/shell/extensions/extension.js': {Extension},
-        './lockSession.js': {LockSession, LOCKED_STATE: 'stealth-lock@user.locked'},
-        './presets.js': {initializeEffectPresets: () => {}},
-        './shell.js': {restoreWhenShellReady: callback => {
+        './shell/lockSession.js': {LockSession, LOCKED_STATE: 'stealth-lock@user.locked'},
+        './shared/presets.js': {initializeEffectPresets: () => {}},
+        './shell/integration.js': {restoreWhenShellReady: callback => {
             if (deferRestore)
                 pendingRestore = callback;
             else
@@ -81,7 +91,7 @@ test('reload within the login session reapplies an active privacy screen', async
     extension.lock();
     assert.equal(events.filter(event => event === 'start').length, 1);
     extension.disable();
-    assert.ok(events.indexOf('handoff') < events.indexOf('cancel'));
+    assert.ok(events.indexOf('session-disable') < events.indexOf('lock-watch-disconnect'));
     assert.equal(state.get('stealth-lock@user.locked'), true);
 });
 
@@ -124,7 +134,7 @@ test('diagnostic shortcut cleanup removes only bindings acquired by this extensi
     const released = active.events.filter(event => Array.isArray(event) && event[0] === 'remove' && event[1] === 'debug-abort-hotkey').length;
     assert.equal(acquired, 2);
     assert.equal(released, acquired);
-    assert.equal(active.extension._abortAction, 0);
+    assert.equal(active.extension._shortcuts.abort, 0);
 });
 
 test('deferred recovery rechecks the marker and is canceled when the extension is disabled', async t => {
@@ -176,7 +186,7 @@ test('recovery waits for all startup handlers and releases pending work at eithe
                 },
                 Source: {remove: id => assert.equal(sources.delete(id), true)},
             };
-            const {restoreWhenShellReady} = await loadModule('shell.js', {
+            const {restoreWhenShellReady} = await loadModule('shell/integration.js', {
                 'gi://GLib': {default: GLib},
                 'resource:///org/gnome/shell/ui/main.js': {layoutManager},
             });
@@ -214,7 +224,7 @@ test('recovery waits for all startup handlers and releases pending work at eithe
 });
 
 test('an unavailable native shield refuses handoff without preventing privacy screen ownership', async () => {
-    const {handoffToSystemLock, watchSystemLock} = await loadModule('shell.js', {
+    const {handoffToSystemLock, watchSystemLock} = await loadModule('shell/integration.js', {
         'gi://GLib': {default: {}},
         'resource:///org/gnome/shell/ui/main.js': {screenShield: null},
     });
@@ -228,7 +238,7 @@ test('an unavailable native shield refuses handoff without preventing privacy sc
 test('native handoff requires both locked and active confirmation', async () => {
     for (const [locked, active] of [[false, false], [false, true], [true, false], [true, true]]) {
         const shield = {locked, active, lock: animate => assert.equal(animate, false)};
-        const {handoffToSystemLock} = await loadModule('shell.js', {
+        const {handoffToSystemLock} = await loadModule('shell/integration.js', {
             'gi://GLib': {default: {}},
             'resource:///org/gnome/shell/ui/main.js': {screenShield: shield},
         });
@@ -249,7 +259,7 @@ test('native shield watch ignores intermediate unlocking and releases both conne
         },
         disconnect: id => removed.push(id),
     };
-    const {watchSystemLock} = await loadModule('shell.js', {
+    const {watchSystemLock} = await loadModule('shell/integration.js', {
         'gi://GLib': {default: {}},
         'resource:///org/gnome/shell/ui/main.js': {screenShield: shield},
     });

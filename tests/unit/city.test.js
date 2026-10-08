@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import {validateEffectConfig} from '../../presets.js';
+import {validateEffectConfig} from '../../shared/presets.js';
 import {loadModule} from './harness.js';
 
 async function fixture(overrides = {}, {width = 120, height = 96, random} = {}) {
@@ -11,7 +11,7 @@ async function fixture(overrides = {}, {width = 120, height = 96, random} = {}) 
         seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;
         return seed / 4294967296;
     });
-    const {CityGrowth} = await loadModule('city.js', {'cairo': {default: {Operator: {SOURCE: 1}}}}, {Math: math});
+    const {CityGrowth} = await loadModule('shell/effects/city.js', {'cairo': {default: {Operator: {SOURCE: 1}}}}, {Math: math});
     const knobs = validateEffectConfig(JSON.stringify({effect: 'city-grow', knobs: overrides})).knobs;
     const scene = new CityGrowth(width, height, knobs);
     const operations = [];

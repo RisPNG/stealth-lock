@@ -69,10 +69,10 @@ install_extension() {
     uuid=$(sed -n 's/.*"uuid"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$tmp/metadata.json")
     [ -n "$uuid" ] || slh_die "no uuid in the metadata.json of $src"
     if [ -d "$tmp/schemas" ]; then glib-compile-schemas --strict "$tmp/schemas"; fi
-    cp "$SLH_HARNESS_DIR/stubs/authentication.py" "$tmp/authentication.py"
-    grep -qx 'STEALTH_LOCK_AUTH_FIXTURE = True' "$tmp/authentication.py" || slh_die "authentication fixture was not installed"
-    cmp "$SLH_HARNESS_DIR/stubs/authentication.py" "$tmp/authentication.py" || slh_die "authentication fixture differs"
-    if grep -q 'ctypes\|pam_authenticate' "$tmp/authentication.py"; then slh_die "authentication fixture can reach PAM"; fi
+    cp "$SLH_HARNESS_DIR/stubs/authentication.py" "$tmp/helpers/authentication.py"
+    grep -qx 'STEALTH_LOCK_AUTH_FIXTURE = True' "$tmp/helpers/authentication.py" || slh_die "authentication fixture was not installed"
+    cmp "$SLH_HARNESS_DIR/stubs/authentication.py" "$tmp/helpers/authentication.py" || slh_die "authentication fixture differs"
+    if grep -q 'ctypes\|pam_authenticate' "$tmp/helpers/authentication.py"; then slh_die "authentication fixture can reach PAM"; fi
     mv "$tmp" "$ext_dir/$uuid"
     echo "$uuid" > "$SLH_ROOT/run/ext-uuid"
 }
@@ -126,7 +126,7 @@ cmd_start() {
         check_root
         local uuid
         uuid=$(cat "$SLH_ROOT/run/ext-uuid")
-        cmp "$SLH_HARNESS_DIR/stubs/authentication.py" "$SLH_ROOT/xdg-data/gnome-shell/extensions/$uuid/authentication.py" || slh_die "restart authentication fixture differs"
+        cmp "$SLH_HARNESS_DIR/stubs/authentication.py" "$SLH_ROOT/xdg-data/gnome-shell/extensions/$uuid/helpers/authentication.py" || slh_die "restart authentication fixture differs"
         rm -f "$SLH_RT/bus" "$SLH_RT/system_bus_socket" "$SLH_RT/wayland-test" "$SLH_RT/wayland-test.lock"
     else
         prepare_root

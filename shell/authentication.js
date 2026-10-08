@@ -8,7 +8,7 @@ export const MAX_PASSWORD_BYTES = 512;
 
 export class Authentication {
     constructor(path, cancellable) {
-        this._helperPath = GLib.build_filenamev([path, 'authentication.py']);
+        this._helperPath = GLib.build_filenamev([path, 'helpers', 'authentication.py']);
         this._cancellable = cancellable;
         this.busy = false;
         this._failures = 0;

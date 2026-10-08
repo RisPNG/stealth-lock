@@ -1,72 +1,127 @@
 # Stealth Lock
 
-A password-protected privacy screen for GNOME Shell, inspired by xtrlock. Your desktop remains visible while desktop input is blocked. It is intended for short absences such as stepping away for dinner or a bathroom break.
+Stealth Lock is a password-protected privacy screen for GNOME Shell. It keeps your desktop visible while blocking keyboard and mouse input.
 
-Press Super+Ctrl+L to activate, type your login password, and press Enter to dismiss it. Escape clears the password. After five seconds without keyboard activity the password clears automatically; preferences can change or disable that timeout. Normal mode shows a native password entry with a reveal button; Stealth mode keeps input invisible. Ctrl+R toggles reveal in Normal mode when GNOME permits password reveal, and Ctrl+U clears input. Clipboard paste is blocked so another person cannot paste and reveal your clipboard contents.
+The idea came from [xtrlock](https://manpages.debian.org/unstable/xtrlock/xtrlock.1.en.html), which was built for X11. I started this extension to bring that idea to GNOME Shell on both X11 and Wayland. It has since grown into its own project, with more features and appearance settings.
 
-The extension can freeze every monitor using an in-memory snapshot, pause playing MPRIS media, and show a configurable lock cursor, the normal cursor, or no cursor. Preferences retain cursor colors/images, prompt positioning, custom CSS, and saved CSS styles. The built-in cursor preserves the original bitmap and hotspot; custom images load asynchronously and fall back to it when unavailable. Built-in colors and layout live in the central stylesheets; GNOME selects and updates the light/dark variant.
+## But why?
 
-Fresh installations start with three ordinary saved visual entries: Dim and Blur, Neo Rain, and City Grow. They are initially inactive. Select one in Appearance, or use the saved-entry editor to edit its JSON settings, add your own entry, rename, duplicate, or remove entries. Starter entries have the same format and behavior as entries you save yourself. Updates and reinstalls preserve edits and deletions, including an empty library. Reduced motion stops animation while retaining a static frame and any enabled clock. Effects cannot change password handling or authentication.
+That depends on your use case.
 
-Ctrl+Alt+Shift+L hands off to GNOME's native lock. Debug abort shortcuts and five consecutive Escapes do the same; they never bypass authentication. A handoff releases the privacy screen only after GNOME confirms it is locked. Paused media stays paused during handoff and resumes after GNOME unlocks. Disabling an active extension first requests the native lock and leaves media paused. If GNOME refuses that request, disabling still removes the extension and exposes the desktop; its recovery marker reapplies protection only when it is enabled again.
+You might want to keep a movie or music playing without accidental input skipping playback, changing the volume, or minimising a window.
 
-GNOME's per-login runtime state records an active privacy screen. If Shell restarts and reloads the extension in the same login session, the privacy screen is reapplied after Shell's startup handlers finish. Successful password authentication or completion of native locking/unlocking clears the record. The record contains no passwords or images and does not persist across logout or reboot. GNOME may disable extensions following a crash during its first minute of startup; restoration requires this extension to load. Recovery cannot protect the interval before the extension runs. Use GNOME's native lock when you need its session-lock guarantees.
+You might also want a different appearance for the privacy screen. You can change the password prompt, cursor and visual effects, or use custom CSS to style it yourself.
 
-## Authentication and supported environments
+## Install
 
-The declared GNOME Shell versions remain 45–48, on Linux with GDM's `gdm-password` PAM service. `/usr/bin/python3`, `libpam.so.0`, and that service are required. No Python PAM package, sudo, root installation, shadow-file access, or alternate authentication service is used. Both password authentication and PAM account validation must succeed, including PAM cleanup; every error rejects the attempt. Only one password prompt is supported. Fingerprint, smartcard, multi-factor prompts, password expiry/change, and passwordless accounts are outside this password-only flow; use the native lock for those flows.
+The project targets GNOME Shell 45–51 on Linux. Password authentication currently requires GNOME's login manager, GDM.
 
-One authentication attempt may run at a time. A failed attempt imposes a delay of 1, 2, 4, 8, 16, then at most 30 seconds. Attempts time out after ten seconds. Passwords are limited to 512 UTF-8 bytes; the native entry also caps editing at 512 characters. Oversized input is rejected without truncating it or calling PAM. Normal mode displays authentication and retry status; Stealth mode keeps feedback hidden unless diagnostics are enabled. A rejected password and unavailable authentication have distinct messages. Disabling or handing off cancels work and terminates a running helper. Passwords travel through the helper's private stdin, never command-line arguments or logs. Native widget and Python buffers are cleared when their lifetime ends; JavaScript and Python strings cannot promise cryptographic memory erasure.
-
-## Install and remove
-
-From the source checkout:
+Run this from the source checkout as your desktop user, without sudo:
 
 ```sh
 mise exec -- bash install.sh
 ```
 
-Packaging uses `gnome-extensions pack` and verifies the exact runtime-only file inventory and nonexecutable permissions. Installation stages that archive in your user-local extension directory, compiles its local schema, and preserves the previous installation if replacement fails. It never writes system schemas. Log out and back in to load new code, then enable `stealth-lock@user` in Extensions. Installation itself does not enable or reload the running extension.
+Then log out and back in, and enable `stealth-lock@user` in Extensions. The installer does not enable it for you. It installs only for your user and keeps your existing settings.
+
+<details>
+<summary>Tools needed for source installation</summary>
+
+The commands use mise. Installation also needs Bash, `gnome-extensions`, GJS, GLib schema tools, unzip and `/usr/bin/python3`. Node and npm are only needed for development checks.
+
+The extension is installed in `$XDG_DATA_HOME/gnome-shell/extensions/stealth-lock@user`, or `~/.local/share/gnome-shell/extensions/stealth-lock@user` when `XDG_DATA_HOME` is unset.
+
+</details>
+
+## Using Stealth Lock
+
+Press Super+Ctrl+L to activate it. To unlock, type your login password and press Enter. You can change the activation shortcut in preferences.
+
+By default, Stealth mode keeps your password input invisible. If you prefer a visible password box, choose Normal mode. Normal mode also shows whether authentication failed and when you can try again. After a failed attempt, you need to wait before trying again.
+
+| Key | Action |
+| --- | --- |
+| Escape or Ctrl+U | Clear what you have typed |
+| Ctrl+R | Show or hide the password in Normal mode, if GNOME allows it |
+| Ctrl+Alt+Shift+L | Switch to GNOME's native lock screen |
+
+Your typed password clears after five seconds without keyboard activity. You can change or disable that timeout in preferences. Pasting is blocked so someone cannot paste and reveal your clipboard contents.
+
+## Customise it
+
+Preferences let you choose how Stealth Lock looks and behaves:
+
+- **Freeze Display** keeps a still image of your desktop on screen. Turn it off to let the display keep updating.
+- **Pause Media** pauses playback in supported media players and tries to resume it when you unlock. Turn it off if you want playback to continue.
+- **Cursor** lets you use the lock icon, keep your normal cursor or hide it. You can also change its colours or use a custom image.
+- **Password prompt** can follow the pointer or stay at a chosen position on a selected monitor.
+- **Appearance** includes saved visual effects, clocks and custom CSS.
+
+Freeze Display and Pause Media are enabled by default. To keep a movie playing and visible, turn both off.
+
+A new settings profile starts with three optional effects: Dim and Blur, Neo Rain and City Grow. They are initially inactive. Select one in Appearance, or edit, duplicate and remove entries to make your own collection. The library initializes once per profile; your edits and deletions persist across reinstalls. If you prefer less movement, reduced motion keeps a still version of the effect.
+
+CSS and visual effect changes appear immediately. Most other choices take effect the next time you activate Stealth Lock.
+
+## A note about locking
+
+Stealth Lock depends on the extension running. Use GNOME's own lock screen when you need protection that does not depend on this extension. Stealth Lock uses your login password; fingerprint, smartcard and multi-factor sign-in are not supported.
+
+Ctrl+Alt+Shift+L keeps the privacy screen in place until GNOME confirms that its native lock is active. Media paused by Stealth Lock stays paused until GNOME unlocks.
+
+Disabling Stealth Lock while it is active also requests native locking and leaves paused media paused. If that request fails, disabling still removes the privacy screen and exposes the desktop. After a Shell restart, Stealth Lock can restore the privacy screen if the extension loads again, but it cannot protect the interval before it loads.
+
+## Update or remove
+
+Before updating, unlock Stealth Lock and disable it in Extensions. Run the installation command again, then log out and back in and enable it. Your settings are kept.
+
+To remove the extension and keep its settings:
 
 ```sh
 mise exec -- bash uninstall.sh
+```
+
+To remove it and reset its settings instead:
+
+```sh
 mise exec -- bash uninstall.sh --purge-settings
 ```
 
-Settings are retained unless `--purge-settings` is supplied. Old system-wide copies or schemas from earlier installers require separate manual cleanup; the new scripts manage only the user-local installation.
+Choose one removal command. Resetting settings needs the installed files, so it must be done before they are removed. These scripts manage only your user installation.
 
-## Build and verify
+## Development
+
+To install the development dependencies, run the checks and build an archive:
 
 ```sh
 mise exec -- npm ci
-mise exec -- npm run lint
-mise exec -- npm test
-mise exec -- npm run test:auth
-PYTHONDONTWRITEBYTECODE=1 mise exec -- python3 -m unittest discover -s tests/auth
 mise exec -- npm run check
-mise exec -- npm run test:shell
 mise exec -- npm run package
 ```
 
-The full check additionally requires `gjs-check-syntax` and `gjs-check-potfiles` from [GNOME's GJS CI tools](https://gitlab.gnome.org/World/javascript/gjs-ci-tools), REUSE, GLib schema tools, `gnome-extensions`, zip, and unzip. CI installs pinned tooling and runs these gates. The package is written to `dist/`; compiled schemas are generated during installation, never in the source tree or release archive.
+The archive is written to `dist/`. The checks need GJS, Python, GNOME Shell tools, GLib schema tools, zip, unzip, REUSE and [GNOME's GJS CI tools](https://gitlab.gnome.org/World/javascript/gjs-ci-tools).
 
-Unit tests cover authentication, cancellation, retry timing, setup failures, reverse cleanup, native handoff, recovery state, input protection, cursor loading, saved presets, and packaging. Python tests use fake PAM transactions; GJS authentication tests exercise real subprocesses with a fake helper. Neither authenticates a real account. Shell tests use a separate headless compositor, temporary home/settings, private system and session buses, a separate user/network namespace, software rendering, and systemd resource limits. They include an actual compositor kill/restart and recovery after startup. The authentication helper and GDM service are test substitutes. They do not install the extension into the current desktop. See [the fixture documentation](tests/shell/README.md) for coverage and requirements. Real keyboard layouts, IME engines, mixed-scale monitors, native GDM authentication, suspend and distribution-specific recovery still require the manual matrix in [REVIEW.md](REVIEW.md).
+The separate [headless Shell tests](tests/shell/README.md) run with `mise exec -- npm run test:shell`. [REVIEW.md](REVIEW.md) covers implementation details, tested environments, authentication limits and the remaining manual checks.
 
-## Settings migration
+The layout separates GNOME entrypoints, Shell code, shared settings and the authentication helper:
 
-The UUID, schema ID, and existing safe setting keys are retained. The legacy `lock-cursor` value migrates to `cursor-mode` when there is no explicit cursor-mode value. JavaScript stored in settings is retained for export but never executed; its editors, execution API, and the old snippet files are removed. Export previous snippets with:
-
-```sh
-gsettings --schemadir ~/.local/share/gnome-shell/extensions/stealth-lock@user/schemas get org.gnome.shell.extensions.stealth-lock normal-prompt-custom-js
-gsettings --schemadir ~/.local/share/gnome-shell/extensions/stealth-lock@user/schemas get org.gnome.shell.extensions.stealth-lock normal-prompt-custom-js-saved-entries
+```text
+extension.js, prefs.js, metadata.json    GNOME entrypoints
+stylesheet*.css                         GNOME theme entrypoints
+shell/                                  Session, authentication transport, input and presentation
+  effects/                              Backdrop rendering and City Grow
+shared/                                 Saved-entry and effect configuration
+helpers/                                Python PAM authentication
+styles/                                 Shared theme definitions
+schemas/                                GSettings schema
+scripts/                                Development checks
+tests/                                  Unit, authentication and isolated Shell tests
 ```
 
-The source installer distinguishes a fresh directory from an update and initializes the saved effect library once. Standard ZIP installation has no install hook: initialization happens when the extension or preferences first loads, preserving profiles with existing user settings. An old profile that has only untouched defaults is indistinguishable from a fresh profile and receives inactive starter entries. Existing JavaScript is retained separately and never migrated into executable effects.
+- `extension.js` owns enablement and registered shortcuts. It supplies settings, the installation path and current shortcut actions to `LockSession`.
+- `shell/lockSession.js` owns protection, native lock transitions, cancellation and reverse cleanup. `shell/media.js` retains paused players separately until authenticated dismissal or native unlock; disable discards restoration.
+- `shell/input.js` owns native password editing and reveal permissions. `shell/overlay.js` borrows its actor for presentation; `shell/effects/backdrop.js` and `shell/effects/city.js` own visual rendering without access to credentials.
+- `shell/authentication.js` owns helper transport and retry timing; `helpers/authentication.py` owns the PAM transaction. `shell/screenshot.js` owns native capture and `shell/integration.js` isolates startup and screen-shield integration.
+- `shared/presets.js` owns saved-entry validation, effect configuration and one-time initialization. It is used by Shell, preferences and the installer. `prefs.js` owns the native settings UI and shared saved-entry editor. Central stylesheets own the theme.
 
-Saved effect configurations use `{ "effect": "neo-rain", "knobs": {} }`, with effect values `blur`, `neo-rain`, or `city-grow`. The seeded entries expose the supported knobs and defaults. Colors are optional RGBA byte arrays; `null` uses the central theme. Clock settings support locale-formatted dates, 12/24-hour time, seconds, alignment, size, vertical position, and a monitor index, `settings`, or `all`. Unknown fields, invalid ranges, and invalid JSON are rejected before saving or rendering. Malformed saved libraries are preserved for repair.
-
-Prompt/background CSS, the selected effect and its saved configuration, reduced motion, and GNOME theme changes apply immediately. Most other presentation settings take effect on the next activation; changing the monitor layout requests native locking instead of showing a stale frozen frame. Cursor mode, lock type and pointer anchor use native schema enums while retaining compatible stored strings. Coordinate settings retain their full signed 32-bit range: explicit positions are relative to the virtual desktop origin, clamped to the selected display, and negative fixed coordinates center the corresponding axis. [REVIEW.md](REVIEW.md) records remaining product and release decisions.
-
-## Co-developed with LLMs
-
-This project is co-developed with LLMs. Human maintainers remain responsible for reviewing, understanding, researching, and testing accepted contributions.
+Unit tests execute unchanged ES modules with explicit native dependency mocks, using Node's VM module flag through `npm test`. Installer integration tests execute the real initializer with temporary HOME/XDG directories and a private settings backend. `package.sh` defines the runtime payload once and verifies the resulting archive against it.

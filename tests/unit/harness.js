@@ -2,22 +2,28 @@ import fs from 'node:fs/promises';
 import vm from 'node:vm';
 
 export async function loadModule(filename, dependencies, globals = {}) {
-    const source = await fs.readFile(new URL('../../' + filename, import.meta.url), 'utf8');
-    const exports = [];
-    const script = source.replace(/^import (.+) from '([^']+)';$/gm, (_line, names, specifier) => {
-        if (!dependencies[specifier])
-            throw new Error('Unexpected dependency: ' + specifier);
-        const target = `dependencies[${JSON.stringify(specifier)}]`;
-        if (names.startsWith('* as '))
-            return `const ${names.slice(5)} = ${target};`;
-        if (names.startsWith('{'))
-            return `const ${names.replace(/ as /g, ': ')} = ${target};`;
-        return `const ${names} = ${target}.default;`;
-    }).replace(/export (default )?(async )?(class|function|const) (\w+)/g, (_text, isDefault, async, kind, name) => {
-        exports.push(`${isDefault ? 'default' : name}: ${name}`);
-        return `${async ?? ''}${kind} ${name}`;
+    const url = new URL('../../' + filename, import.meta.url);
+    const context = vm.createContext({console, ...globals});
+    const modules = new Map();
+    const module = new vm.SourceTextModule(await fs.readFile(url, 'utf8'), {
+        context,
+        identifier: url.href,
+        initializeImportMeta(meta) { meta.url = url.href; },
     });
-    return vm.runInNewContext(script + '\n({' + exports.join(',') + '})', {console, dependencies, ...globals}, {filename});
+    await module.link(specifier => {
+        if (!Object.hasOwn(dependencies, specifier))
+            throw new Error('Unexpected dependency: ' + specifier);
+        if (!modules.has(specifier)) {
+            const values = dependencies[specifier];
+            modules.set(specifier, new vm.SyntheticModule(Object.keys(values), function () {
+                for (const [name, value] of Object.entries(values))
+                    this.setExport(name, value);
+            }, {context, identifier: specifier}));
+        }
+        return modules.get(specifier);
+    });
+    await module.evaluate();
+    return module.namespace;
 }
 
 export class Cancellable {

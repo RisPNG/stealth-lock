@@ -6,7 +6,7 @@
     "license": "GPL-3.0-only",
     "scripts": {
         "lint": "eslint .",
-        "test": "node --test tests/unit/*.test.js",
+        "test": "node --experimental-vm-modules --test tests/unit/*.test.js",
         "test:auth": "gjs -m tests/authentication-gjs.js",
         "test:stylesheets": "bash scripts/check-stylesheets.sh",
         "test:shell": "bash tests/shell/run.sh",

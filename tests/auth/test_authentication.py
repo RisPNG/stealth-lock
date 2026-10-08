@@ -8,7 +8,7 @@ from unittest import mock
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
-SPEC = importlib.util.spec_from_file_location("authentication", ROOT / "authentication.py")
+SPEC = importlib.util.spec_from_file_location("authentication", ROOT / "helpers" / "authentication.py")
 authentication = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(authentication)
 
@@ -301,7 +301,7 @@ class AuthenticationTests(unittest.TestCase):
         for payload in (b"", b"secret\n", b"secret\r", b"secret\0tail", b"\xff", b"x" * 513, b"x" * 512 + b"\n", b"x" * 1048576):
             with self.subTest(payload=payload):
                 result = subprocess.run(
-                    ["/usr/bin/python3", "-I", "-B", str(ROOT / "authentication.py")],
+                    ["/usr/bin/python3", "-I", "-B", str(ROOT / "helpers" / "authentication.py")],
                     input=payload, capture_output=True, timeout=5, check=False,
                 )
                 self.assertEqual(result.returncode, 2)
