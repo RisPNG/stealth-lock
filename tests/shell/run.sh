@@ -12,6 +12,9 @@ export SLH_ENABLE_EXT=1
 cleanup() {
     local status=$?
     if [[ "$status" -ne 0 ]]; then
+        if [[ -f "$SLH_ROOT/run/expected-logs.json" && -f "$SLH_ROOT/logs/shell.log" ]]; then
+            mise exec -- /usr/bin/python3 -I -B "$here/check-log.py" "$SLH_ROOT" || true
+        fi
         "$here/run-shell.sh" status || true
         tail -n 60 "$SLH_ROOT/logs/shell.log" "$SLH_ROOT/logs/scope.log" >&2 || true
     fi

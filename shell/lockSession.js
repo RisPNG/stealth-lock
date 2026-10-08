@@ -62,7 +62,9 @@ export class LockSession {
             overlay.positionPrompt();
             const grab = Main.pushModal(overlay.actor, {actionMode: Shell.ActionMode.NONE});
             this._cleanup.push(() => Main.popModal(grab));
-            if ((grab.get_seat_state() & Clutter.GrabState.ALL) !== Clutter.GrabState.ALL)
+            if (global.stage.get_grab_actor() !== overlay.actor ||
+                typeof grab.get_seat_state === 'function' &&
+                (grab.get_seat_state() & Clutter.GrabState.ALL) !== Clutter.GrabState.ALL)
                 throw new Error('Could not acquire the keyboard and pointer');
             this._grabbed = true;
             this._runtime.locked = true;

@@ -1,4 +1,4 @@
-"""Reject native diagnostics except declared failures and one precise upstream metadata warning."""
+"""Reject native diagnostics except declared failures and bounded upstream metadata warnings."""
 
 import json
 import pathlib
@@ -17,12 +17,21 @@ diagnostic = re.compile(
 patterns = [(re.compile(entry['pattern']), entry['count']) for entry in expected]
 observed = [0] * len(patterns)
 unexpected = []
-upstream_pids = set()
-# GJS 1.84.2 gi/object.cpp uses GValue when the AccountsService int property has an enum getter.
-upstream_warning = re.compile(
-    r'^\(gnome-shell:(\d+)\): Gjs-WARNING \*\*: \d{2}:\d{2}:\d{2}\.\d+: '
-    r'Type gint32 of property AccountsService\.User::password-mode does not match return type '
-    r'interface of getter get_password_mode\. Falling back to slow path$'
+upstream_seen = set()
+# GJS 1.84–1.90 gi/object.cpp uses GValue when the AccountsService int property has an enum getter.
+upstream_warnings = (
+    re.compile(
+        r'^\(gnome-shell:(\d+)\): Gjs-WARNING \*\*: \d{2}:\d{2}:\d{2}\.\d+: '
+        r'Type (?:gint32 of property AccountsService\.User::password-mode does not match return type interface'
+        r'|GITypeInfo of property AccountsService\.User::password-mode does not match return type GITypeInfo) '
+        r'of getter get_password_mode\. Falling back to slow path$'
+    ),
+    # GJS 1.80.2 gi/ns.cpp resolves streams duplicated in GLib 2.80 Gio/GioUnix typelibs.
+    re.compile(
+        r'^\(gnome-shell:(\d+)\): Gjs-WARNING \*\*: \d{2}:\d{2}:\d{2}\.\d+: '
+        r'Gio\.Unix(Input|Output)Stream has been moved to a separate platform-specific library\. '
+        r'Please update your code to use GioUnix\.\2Stream instead\.$'
+    ),
 )
 
 for number, line in enumerate((root / 'logs' / 'shell.log').read_text().splitlines(), 1):
@@ -33,9 +42,11 @@ for number, line in enumerate((root / 'logs' / 'shell.log').read_text().splitlin
             observed[index] += 1
             break
     else:
-        upstream = upstream_warning.fullmatch(line)
-        if upstream and upstream[1] not in upstream_pids:
-            upstream_pids.add(upstream[1])
+        for index, pattern in enumerate(upstream_warnings):
+            upstream = pattern.fullmatch(line)
+            if upstream and (index, *upstream.groups()) not in upstream_seen:
+                upstream_seen.add((index, *upstream.groups()))
+                break
         else:
             unexpected.append(f'{number}: {line}')
 
@@ -48,4 +59,4 @@ for index, (pattern, count) in enumerate(patterns):
 
 if unexpected:
     sys.exit(1)
-print(f'shell logs passed ({sum(observed)} expected diagnostics, {len(upstream_pids)} upstream metadata warnings)')
+print(f'shell logs passed ({sum(observed)} expected diagnostics, {len(upstream_seen)} upstream metadata warnings)')

@@ -4,7 +4,8 @@ import {setImmediate} from 'node:timers/promises';
 
 import {Cancellable, deferred, loadModule} from './harness.js';
 
-async function runtime({capture, verification, handoff = false, grabbed = true, freeze = false, pause = false,
+async function runtime({capture, verification, handoff = false, grabbed = true, seatState = grabbed ? 3 : 0,
+    grabApi = 'seat', grabActor = 'overlay', freeze = false, pause = false,
     overlayError = false, authenticationError = false, cursorMode = 'normal', cursorApi = 'visibility', cursorVisible = true,
     cursorInhibitors = 0, nativeCursorInhibitor = false, mediaPause, deferPersistence = false} = {}) {
     const events = [];
@@ -16,6 +17,7 @@ async function runtime({capture, verification, handoff = false, grabbed = true, 
     const runtimeState = {locked: false, restorePrivacy: false, intent: null, current: null, pendingPauses: new Map()};
     const shortcuts = {lock: 7, abort: 8};
     const native = {locked: handoff, onLock: null};
+    const modal = {actor: null, owned: null};
     const display = {action: 0, get_keybinding_action() { return this.action; },
         get_sound_player: () => ({play_from_theme: name => events.push(['sound', name])})};
     let nextSource = 1;
@@ -76,16 +78,25 @@ async function runtime({capture, verification, handoff = false, grabbed = true, 
         KEY_l: 108, KEY_L: 76, KEY_u: 117, KEY_U: 85, KEY_Super_L: 1001, KEY_Super_R: 1002,
         KEY_Insert: 1003, KEY_Meta_L: 1004, KEY_Meta_R: 1005,
     };
+    if (grabApi === 'native')
+        delete Clutter.GrabState;
     const Main = {
         layoutManager: {...emitter, addTopChrome: actor => {
             chrome.add(actor);
             events.push('chrome-add');
         }},
-        pushModal: () => {
+        pushModal: actor => {
             events.push('grab');
-            return {get_seat_state: () => grabbed ? 3 : 0};
+            modal.owned = actor;
+            modal.actor = grabActor === 'overlay' ? actor : grabActor === 'inactive' ? null : {};
+            return grabApi === 'native' ? {} : {get_seat_state: () => seatState};
         },
-        popModal: () => events.push('ungrab'),
+        popModal: () => {
+            events.push('ungrab');
+            if (modal.actor === modal.owned)
+                modal.actor = null;
+            modal.owned = null;
+        },
         notifyError: () => events.push('notify-error'),
     };
     class Input {
@@ -175,7 +186,7 @@ async function runtime({capture, verification, handoff = false, grabbed = true, 
         }
     }
     const global = {
-        stage: {context: {get_backend: () => ({get_default_seat: () => seat})}},
+        stage: {get_grab_actor: () => modal.actor, context: {get_backend: () => ({get_default_seat: () => seat})}},
         backend: {get_cursor_tracker: () => tracker},
         display,
         get_runtime_state: () => assert.fail('session coordination must not read asynchronous persistence'),
@@ -227,7 +238,7 @@ async function runtime({capture, verification, handoff = false, grabbed = true, 
     }, {global, TextEncoder, console: {debug: message => events.push(message), error: message => events.push(message), warn: message => events.push(message)}});
     const session = new module.LockSession({path: '/extension', settings, shortcuts, runtime: runtimeState, onClosed: () => events.push('closed')});
     return {session, events, signals, sources, state, writes, runtimeState, settings, values, Clutter, chrome,
-        shortcuts, display, native, tracker, seat, key: (key, state = 0) => ({
+        shortcuts, display, native, modal, tracker, seat, key: (key, state = 0) => ({
         type: () => Clutter.EventType.KEY_PRESS, get_key_symbol: () => key, get_state: () => state,
         get_key_code: () => 1, get_key_unicode: () => key,
     })};
@@ -405,6 +416,88 @@ test('failure to grab input reports activation failure and never claims protecti
     assert.ok(events.includes('notify-error'));
     assert.ok(events.includes('ungrab'));
     assert.equal(state.has('stealth-lock@user.locked'), false);
+});
+
+test('native grabs without seat-state API protect input until authenticated cleanup', async () => {
+    const verification = deferred();
+    const {session, events, state, runtimeState, modal, chrome} = await runtime({grabApi: 'native', verification});
+    await session.start();
+    assert.equal(modal.actor, session._overlay.actor);
+    assert.equal(session._grabbed, true);
+    assert.equal(session._ready, true);
+    assert.equal(runtimeState.locked, true);
+    assert.equal(state.get('stealth-lock@user.locked'), true);
+    assert.equal(events.includes('native-lock-request'), false);
+    session._input.actor.text = 'correct';
+    const attempt = session.authenticate();
+    verification.resolve('granted');
+    await attempt;
+    session.close();
+    assert.equal(modal.actor, null);
+    assert.equal(chrome.size, 0);
+    assert.equal(runtimeState.locked, false);
+    assert.equal(state.has('stealth-lock@user.locked'), false);
+    assert.equal(events.filter(event => event === 'ungrab').length, 1);
+    assert.equal(events.filter(event => event === 'closed').length, 1);
+    assert.ok(events.indexOf('ungrab') < events.indexOf('overlay-destroy'));
+});
+
+test('inactive and foreign modal actors never claim input protection', async t => {
+    for (const grabApi of ['seat', 'native']) {
+        for (const grabActor of ['inactive', 'foreign']) {
+            await t.test(`${grabApi}: ${grabActor}`, async () => {
+                const {session, events, state, runtimeState, modal, chrome} = await runtime({grabApi, grabActor});
+                await session.start();
+                assert.equal(session._grabbed, false);
+                assert.equal(session._ready, false);
+                assert.equal(runtimeState.locked, false);
+                assert.equal(state.has('stealth-lock@user.locked'), false);
+                assert.equal(events.includes('notify-error'), true);
+                assert.equal(events.filter(event => event === 'ungrab').length, 1);
+                assert.equal(events.filter(event => event === 'closed').length, 1);
+                assert.equal(chrome.size, 0);
+                assert.equal(modal.owned, null);
+                assert.equal(modal.actor === null, grabActor === 'inactive');
+            });
+        }
+    }
+});
+
+test('seat-state runtimes reject every incomplete keyboard and pointer grab', async t => {
+    for (const seatState of [0, 1, 2]) {
+        await t.test(`seat state ${seatState}`, async () => {
+            const {session, events, state, runtimeState, modal, chrome} = await runtime({seatState});
+            await session.start();
+            assert.equal(session._grabbed, false);
+            assert.equal(runtimeState.locked, false);
+            assert.equal(state.has('stealth-lock@user.locked'), false);
+            assert.equal(events.includes('notify-error'), true);
+            assert.equal(events.filter(event => event === 'ungrab').length, 1);
+            assert.equal(modal.actor, null);
+            assert.equal(chrome.size, 0);
+        });
+    }
+});
+
+test('native handoff releases only the privacy grab and retains native ownership', async () => {
+    const {session, events, state, runtimeState, modal, native, chrome} = await runtime({grabApi: 'native', handoff: true});
+    await session.start();
+    const nativeActor = {};
+    native.onLock = () => { modal.actor = nativeActor; };
+    assert.equal(session.handoff(), true);
+    assert.equal(modal.actor, nativeActor);
+    assert.equal(modal.owned, null);
+    assert.equal(chrome.size, 0);
+    assert.equal(runtimeState.locked, true);
+    assert.equal(state.get('stealth-lock@user.locked'), true);
+    assert.ok(events.indexOf('native-lock-request') < events.indexOf('ungrab'));
+    session.systemLockChanged(false);
+    session.systemLockChanged(false);
+    assert.equal(modal.actor, nativeActor);
+    assert.equal(runtimeState.locked, false);
+    assert.equal(state.has('stealth-lock@user.locked'), false);
+    assert.equal(events.filter(event => event === 'ungrab').length, 1);
+    assert.equal(events.filter(event => event === 'closed').length, 1);
 });
 
 test('overlay constructor failure still discards the immediately owned password input', async () => {

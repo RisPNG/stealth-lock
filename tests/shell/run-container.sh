@@ -79,7 +79,11 @@ docker exec --user 1000 --workdir /project \
             exit 1
         }
         echo "$actual"
-        unshare --user --map-current-user --net -- true
-        echo "Fixture user and network namespace preflight passed"
+        mise use --global node@24.21.0
+        unshare --user --map-current-user --net -- bash -eu -c "
+            echo Fixture user and network namespace preflight passed
+            mise exec -- python3 -I -B -m unittest discover -s tests/visual -p test_visual_renderer.py
+            mise exec -- gjs -m tests/visual/process.js
+        "
         mise exec -- bash tests/shell/run.sh
     '

@@ -6,6 +6,9 @@ import {assert, delay, setAuthControl, waitFor} from './support.js';
 
 export async function run() {
     GLib.log_set_debug_enabled(true);
+    const expectedLogs = [];
+    const expectedLogFile = Gio.File.new_for_path(`${GLib.getenv('SLH_ROOT')}/run/expected-logs.json`);
+    expectedLogFile.replace_contents('[]', null, false, Gio.FileCreateFlags.PRIVATE, null);
     const uuid = 'stealth-lock@user';
     const directory = Gio.File.new_for_uri(import.meta.url).get_parent();
     const children = directory.enumerate_children('standard::name', Gio.FileQueryInfoFlags.NONE, null);
@@ -22,7 +25,6 @@ export async function run() {
     assert(!global.backend.is_rendering_hardware_accelerated(), 'Software rendering required');
     assert(Main.layoutManager.monitors.length === 2, 'Two native virtual monitors required');
     const helper = Main.extensionManager.lookup('harness-helper@test').stateObj;
-    const expectedLogs = [];
     let passed = 0;
     let skipped = 0;
     for (const name of names) {
@@ -49,7 +51,11 @@ export async function run() {
             try {
                 const result = await scenario({
                     extension, settings, helper, uuid,
-                    expectLog(pattern, count = 1) { expectedLogs.push({pattern, count}); },
+                    expectLog(pattern, count = 1) {
+                        expectedLogs.push({pattern, count});
+                        expectedLogFile.replace_contents(JSON.stringify(expectedLogs), null, false,
+                            Gio.FileCreateFlags.PRIVATE, null);
+                    },
                 });
                 if (result?.skipped) {
                     skipped++;
@@ -66,8 +72,6 @@ export async function run() {
             }
         }
     }
-    Gio.File.new_for_path(`${GLib.getenv('SLH_ROOT')}/run/expected-logs.json`).replace_contents(
-        JSON.stringify(expectedLogs), null, false, Gio.FileCreateFlags.PRIVATE, null);
     const launcher = new Gio.SubprocessLauncher({flags: Gio.SubprocessFlags.STDOUT_PIPE | Gio.SubprocessFlags.STDERR_PIPE});
     launcher.setenv('STEALTH_LOCK_TEST_EXTENSION', Main.extensionManager.lookup(uuid).path, true);
     launcher.setenv('GSETTINGS_BACKEND', 'memory', true);

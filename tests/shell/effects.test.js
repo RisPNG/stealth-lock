@@ -1,5 +1,7 @@
+import Cairo from 'cairo';
 import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
+import PangoCairo from 'gi://PangoCairo';
 import Shell from 'gi://Shell';
 import St from 'gi://St';
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
@@ -21,11 +23,97 @@ export const tests = {
     async 'all ordinary starter programs use isolated workers and release native resources after dismissal'({extension, settings}) {
         const {DEFAULT_EFFECT_PRESETS} = await import(Gio.File.new_for_path(extension.path)
             .resolve_relative_path('shared/presets.js').get_uri());
+        const {VisualEffect} = await import(Gio.File.new_for_path(extension.path)
+            .resolve_relative_path('shell/effects/renderer.js').get_uri());
+        const originals = {renderFrame: VisualEffect.prototype.renderFrame, paint: Cairo.Context.prototype.paint,
+            createLayout: PangoCairo.create_layout, showLayout: PangoCairo.show_layout};
+        const contexts = new WeakMap();
+        const requests = [];
+        const decoder = new TextDecoder();
+        const cgroup = decoder.decode(GLib.file_get_contents('/proc/self/cgroup')[1]).match(/^0::([^\n]+)$/m)?.[1];
+        const cpuStat = cgroup ? `/sys/fs/cgroup${cgroup}/cpu.stat` : null;
+        let starter;
+        function sampleScheduling() {
+            try {
+                const thread = decoder.decode(GLib.file_get_contents('/proc/thread-self/schedstat')[1]).trim().split(/\s+/).map(Number);
+                const cpu = cpuStat && GLib.file_test(cpuStat, GLib.FileTest.EXISTS)
+                    ? Object.fromEntries(decoder.decode(GLib.file_get_contents(cpuStat)[1])
+                    .trim().split('\n').map(line => line.split(/\s+/)).map(([key, value]) => [key, Number(value)])) : {};
+                return {cpu: thread[0], waiting: thread[1], throttled: cpu.nr_throttled, throttleTime: cpu.throttled_usec};
+            } catch {
+                return null;
+            }
+        }
         const animations = global.force_animations;
         global.force_animations = true;
         try {
+            VisualEffect.prototype.renderFrame = async function (event, code) {
+                if (event !== 'init')
+                    return originals.renderFrame.call(this, event, code);
+                const context = this._context;
+                const metrics = {starter, started: GLib.get_monotonic_time(), paint: null, glyph: null};
+                contexts.set(context, metrics);
+                const worker = this._process;
+                const request = worker.request;
+                requests.push({worker, request});
+                worker.request = async function (frame) {
+                    const response = await request.call(this, frame);
+                    if (frame.event === 'init') {
+                        metrics.before = sampleScheduling();
+                        metrics.nativeStarted = GLib.get_monotonic_time();
+                    }
+                    return response;
+                };
+                try {
+                    return await originals.renderFrame.call(this, event, code);
+                } finally {
+                    const finished = GLib.get_monotonic_time();
+                    const after = metrics.before ? sampleScheduling() : null;
+                    contexts.delete(context);
+                    const before = metrics.before;
+                    console.info(`Stealth Lock native replay metrics: ${JSON.stringify({
+                        starter: metrics.starter, ready: this._ready, destroyed: this._destroyed,
+                        initWallMicroseconds: finished - metrics.started,
+                        validationReplayClockWallMicroseconds: metrics.nativeStarted ? finished - metrics.nativeStarted : null,
+                        validationReplayClockThreadCpuMicroseconds: before && after ? (after.cpu - before.cpu) / 1000 : null,
+                        validationReplayClockSchedulerWaitMicroseconds: before && after ? (after.waiting - before.waiting) / 1000 : null,
+                        validationReplayClockThrottledPeriods: Number.isFinite(before?.throttled) && Number.isFinite(after?.throttled)
+                            ? after.throttled - before.throttled : null,
+                        validationReplayClockThrottleMicroseconds: Number.isFinite(before?.throttleTime) && Number.isFinite(after?.throttleTime)
+                            ? after.throttleTime - before.throttleTime : null,
+                        firstPaintMicroseconds: metrics.paint, firstColdGlyphMicroseconds: metrics.glyph,
+                    })}`);
+                }
+            };
+            Cairo.Context.prototype.paint = function (...args) {
+                const metrics = contexts.get(this);
+                if (!metrics || metrics.paint !== null)
+                    return originals.paint.apply(this, args);
+                const started = GLib.get_monotonic_time();
+                try {
+                    return originals.paint.apply(this, args);
+                } finally {
+                    metrics.paint = GLib.get_monotonic_time() - started;
+                }
+            };
+            PangoCairo.create_layout = function (context, ...args) {
+                const metrics = contexts.get(context);
+                if (metrics && metrics.glyphStarted === undefined)
+                    metrics.glyphStarted = GLib.get_monotonic_time();
+                return originals.createLayout.call(this, context, ...args);
+            };
+            PangoCairo.show_layout = function (context, ...args) {
+                const metrics = contexts.get(context);
+                try {
+                    return originals.showLayout.call(this, context, ...args);
+                } finally {
+                    if (metrics?.glyphStarted !== undefined && metrics.glyph === null)
+                        metrics.glyph = GLib.get_monotonic_time() - metrics.glyphStarted;
+                }
+            };
             await waitFor(() => St.Settings.get().enable_animations, 'Private software-rendered animations enabled');
             for (const entry of DEFAULT_EFFECT_PRESETS) {
+                starter = entry.name;
                 settings.set_boolean('freeze-display', true);
                 settings.set_string('lock-type', 'normal');
                 const code = entry.code + '\nif (ctx.event !== "destroy") ctx.clock({visible: true});';
@@ -52,6 +140,12 @@ export const tests = {
             }
         } finally {
             extension._session?.close();
+            VisualEffect.prototype.renderFrame = originals.renderFrame;
+            Cairo.Context.prototype.paint = originals.paint;
+            PangoCairo.create_layout = originals.createLayout;
+            PangoCairo.show_layout = originals.showLayout;
+            for (const {worker, request} of requests)
+                worker.request = request;
             global.force_animations = animations;
         }
     },
