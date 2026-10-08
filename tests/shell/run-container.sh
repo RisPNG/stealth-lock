@@ -13,6 +13,7 @@ fedora="${fedora##*/}"
 project="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 staging="$(mktemp -d /tmp/stealth-lock-container.XXXXXX)"
 identifier="stealth-lock-native-${version}-$(basename "$staging")"
+identifier="${identifier,,}"
 container_image="${identifier}:test"
 cleanup() {
     docker rm --force "$identifier" >/dev/null 2>&1 || true
