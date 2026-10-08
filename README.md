@@ -65,6 +65,6 @@ bash uninstall.sh --purge-settings
 
 Choose one removal command. Resetting settings needs the installed files, so use that option before removing them.
 
-## Development and custom programs
+## Development
 
 See the [development guide](dev/README.md) for the project structure, custom visual program API, tests and release process. The interface is English for this release.
