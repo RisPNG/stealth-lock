@@ -15,13 +15,14 @@ import {handoffToSystemLock} from './integration.js';
 import {LOCKED_STATE} from '../shared/runtime-state.js';
 
 export class LockSession {
-    constructor({settings, path, shortcuts, mediaOwnership, onClosed}) {
+    constructor({settings, path, shortcuts, runtime, onClosed}) {
         this.cancellable = new Gio.Cancellable();
         this._settings = settings;
         this._path = path;
         this._shortcuts = shortcuts;
         this._authentication = null;
-        this._media = new PausedMedia(this.cancellable, mediaOwnership);
+        this._runtime = runtime;
+        this._media = new PausedMedia(this.cancellable, runtime);
         this._onClosed = onClosed;
         this._cleanup = [];
         this._closed = false;
@@ -64,6 +65,8 @@ export class LockSession {
             if ((grab.get_seat_state() & Clutter.GrabState.ALL) !== Clutter.GrabState.ALL)
                 throw new Error('Could not acquire the keyboard and pointer');
             this._grabbed = true;
+            this._runtime.locked = true;
+            this._runtime.restorePrivacy = true;
             global.set_runtime_state(LOCKED_STATE, new GLib.Variant('b', true));
 
             overlay.actor.connectObject('captured-event', (_actor, event) => this.handleEvent(event), overlay.actor);
@@ -339,6 +342,9 @@ export class LockSession {
         if (this._closed || this._nativeLock)
             return;
         this._nativeLock = true;
+        this._runtime.locked = true;
+        this._runtime.restorePrivacy = true;
+        global.set_runtime_state(LOCKED_STATE, new GLib.Variant('b', true));
         this.cancellable.cancel();
         this.releasePrivacyResources();
     }
@@ -348,8 +354,11 @@ export class LockSession {
             return;
         this._closed = true;
         this.cancellable.cancel();
-        if (clearState)
+        if (clearState) {
+            this._runtime.locked = false;
+            this._runtime.restorePrivacy = false;
             global.set_runtime_state(LOCKED_STATE, null);
+        }
         this._media.close({resume: resumeMedia});
         this.releasePrivacyResources();
         this._onClosed();

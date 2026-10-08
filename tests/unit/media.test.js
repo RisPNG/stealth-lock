@@ -4,11 +4,14 @@ import test from 'node:test';
 import {Cancellable, loadModule} from './harness.js';
 import {LOCKED_STATE, PAUSED_MEDIA_STATE} from '../../shared/runtime-state.js';
 
-async function runtime({players = [{name: 'org.mpris.MediaPlayer2.player', owner: ':1.44', status: 'Playing'}], saved = null} = {}) {
+async function runtime({players = [{name: 'org.mpris.MediaPlayer2.player', owner: ':1.44', status: 'Playing'}],
+    saved = null, deferPersistence = false} = {}) {
     const calls = [];
     const warnings = [];
     const signals = new Map();
     const state = new Map(saved ? [[PAUSED_MEDIA_STATE, saved]] : []);
+    const writes = new Map();
+    const owner = {locked: false, intent: saved ? structuredClone(saved) : null, current: null, pendingPauses: new Map()};
     let nextId = 1;
     let epoch = 0;
     class Variant {
@@ -38,22 +41,39 @@ async function runtime({players = [{name: 'org.mpris.MediaPlayer2.player', owner
     };
     const DBus = {session: bus};
     const flags = {NONE: 0, NO_AUTO_START: 1};
+    const global = {
+        get_runtime_state: () => assert.fail('live media coordination must not read asynchronous persistence'),
+        set_runtime_state: (key, value) => {
+            const snapshot = value?.deep_unpack() ?? null;
+            if (deferPersistence)
+                writes.set(key, snapshot);
+            else if (snapshot === null)
+                state.delete(key);
+            else
+                state.set(key, snapshot);
+        },
+    };
     const {PausedMedia} = await loadModule('shell/media.js', {
         'gi://Gio': {default: {DBus, DBusCallFlags: flags, DBusSignalFlags: {NONE: 0}}},
         'gi://GLib': {default: {Variant, VariantType: class { constructor(type) { this.type = type; } },
             uuid_string_random: () => 'epoch-' + ++epoch}},
         '../shared/runtime-state.js': {LOCKED_STATE, PAUSED_MEDIA_STATE},
     }, {
-        global: {
-            get_runtime_state: (type, key) => state.has(key) ? new Variant(type, state.get(key)) : null,
-            set_runtime_state: (key, value) => value === null ? state.delete(key) : state.set(key, value.deep_unpack()),
-        },
+        global,
         console: {warn: message => warnings.push(message)},
     });
     const cancellable = new Cancellable();
-    const ownership = {current: null};
-    return {media: new PausedMedia(cancellable, ownership), cancellable, PausedMedia, calls, warnings, signals, state,
-        Variant, flags, DBus, bus, players, faults, ownership, busId: 'original-bus',
+    return {media: new PausedMedia(cancellable, owner), cancellable, PausedMedia, calls, warnings, signals, state,
+        Variant, flags, DBus, bus, players, faults, owner, writes, global, busId: 'original-bus',
+        flushPersistence() {
+            for (const [key, snapshot] of writes) {
+                if (snapshot === null)
+                    state.delete(key);
+                else
+                    state.set(key, snapshot);
+            }
+            writes.clear();
+        },
         signal(owner, status, invalidated = []) {
             for (const subscription of [...signals.values()]) {
                 if (subscription.signal === 'PropertiesChanged')
@@ -246,7 +266,7 @@ test('close waits for a delivered remote Pause before reading playback or compen
     await restoration;
     assert.equal(state.players[0].status, 'Playing');
     assert.equal(state.calls.filter(call => call.method === 'Play').length, 1);
-    assert.equal(state.ownership.pendingPauses.size, 0);
+    assert.equal(state.owner.pendingPauses.size, 0);
 });
 
 test('a replacement scope waits for its predecessor Pause before rehydrating and restoring', async () => {
@@ -257,8 +277,8 @@ test('a replacement scope waits for its predecessor Pause before rehydrating and
     state.cancellable.cancel();
     const oldClose = state.media.close();
     const cancellable = new Cancellable();
-    const replacement = new state.PausedMedia(cancellable, state.ownership);
-    state.state.set(LOCKED_STATE, true);
+    const replacement = new state.PausedMedia(cancellable, state.owner);
+    state.owner.locked = true;
     const adopted = replacement.pause({pausePlaying: false});
     await reply(state, state.calls.at(-1), ['original-bus']);
     assert.equal(state.calls.filter(call => call.method === 'Get').length, 1, 'both scopes await the known remote Pause');
@@ -270,14 +290,14 @@ test('a replacement scope waits for its predecessor Pause before rehydrating and
     await adopted;
     assert.equal(state.calls.filter(call => call.method === 'Play').length, 0);
     assert.equal(replacement._players.size, 1);
-    state.state.delete(LOCKED_STATE);
+    state.owner.locked = false;
     cancellable.cancel();
     const restored = replacement.close();
     await drain(state);
     await restored;
     assert.equal(state.calls.filter(call => call.method === 'Play').length, 1);
-    assert.equal(state.ownership.current, null);
-    assert.equal(state.ownership.pendingPauses.size, 0);
+    assert.equal(state.owner.current, null);
+    assert.equal(state.owner.pendingPauses.size, 0);
 });
 
 test('external Playing, Stopped, invalidated status and disappearing unique owners cancel restoration', async t => {
@@ -326,7 +346,7 @@ test('crash recovery adopts only matching-bus paused owners, with media pausing 
         {name: 'org.mpris.MediaPlayer2.playing', owner: ':1.55', status: 'Playing'},
         {name: 'org.mpris.MediaPlayer2.stopped', owner: ':1.66', status: 'Stopped'},
     ], saved: ['original-bus', 'dead-epoch', [':1.44', ':1.55', ':1.66', ':1.77']]});
-    assert.equal(state.state.get(PAUSED_MEDIA_STATE)[1], 'epoch-1');
+    assert.equal(state.state.get(PAUSED_MEDIA_STATE)[1], 'dead-epoch', 'construction does not claim active ownership');
     await pause(state, {pausePlaying: false});
     assert.deepEqual(state.state.get(PAUSED_MEDIA_STATE)[2], [':1.44']);
     assert.equal(state.calls.filter(call => ['ListNames', 'Pause'].includes(call.method)).length, 0);
@@ -360,16 +380,16 @@ test('relocking during a restoration query adopts intent and prevents the old Pl
     const oldClose = state.media.close();
     const oldQuery = state.calls.at(-1);
     const newCancellable = new Cancellable();
-    const newMedia = new state.PausedMedia(newCancellable, state.ownership);
-    state.state.set(LOCKED_STATE, true);
+    const newMedia = new state.PausedMedia(newCancellable, state.owner);
+    state.owner.locked = true;
+    const newPause = newMedia.pause({pausePlaying: false});
     assert.deepEqual(state.state.get(PAUSED_MEDIA_STATE), ['original-bus', 'epoch-2', [':1.44']]);
     await reply(state, oldQuery, [new state.Variant('s', 'Paused')]);
     await oldClose;
     assert.equal(state.calls.filter(call => call.method === 'Play').length, 0);
-    const newPause = newMedia.pause({pausePlaying: false});
     await drain(state);
     await newPause;
-    state.state.delete(LOCKED_STATE);
+    state.owner.locked = false;
     newCancellable.cancel();
     const restored = newMedia.close();
     await drain(state);
@@ -388,8 +408,8 @@ test('a Play queued before relocking receives a compensating Pause after complet
     const oldPlay = state.calls.at(-1);
     assert.equal(oldPlay.method, 'Play');
     const newCancellable = new Cancellable();
-    const newMedia = new state.PausedMedia(newCancellable, state.ownership);
-    state.state.set(LOCKED_STATE, true);
+    const newMedia = new state.PausedMedia(newCancellable, state.owner);
+    state.owner.locked = true;
     const newPause = newMedia.pause({pausePlaying: false});
     await drain(state, {stopAt: 'Play'});
     const oldPlayIndex = state.calls.indexOf(oldPlay);
@@ -410,7 +430,7 @@ test('a Play queued before relocking receives a compensating Pause after complet
     assert.equal(state.players[0].status, 'Paused');
     assert.equal(state.state.get(PAUSED_MEDIA_STATE)[1], 'epoch-2');
     assert.deepEqual(state.state.get(PAUSED_MEDIA_STATE)[2], [':1.44']);
-    state.state.delete(LOCKED_STATE);
+    state.owner.locked = false;
     newCancellable.cancel();
     const restored = newMedia.close();
     await drain(state);
@@ -422,7 +442,7 @@ test('a Play queued before relocking receives a compensating Pause after complet
 test('restoration under a retained locked marker waits for a future recovery rather than exposing media', async () => {
     const state = await runtime();
     await pause(state);
-    state.state.set(LOCKED_STATE, true);
+    state.owner.locked = true;
     await close(state);
     assert.equal(state.calls.filter(call => call.method === 'Play').length, 0);
     assert.deepEqual(state.state.get(PAUSED_MEDIA_STATE)[2], [':1.44']);
@@ -500,7 +520,413 @@ test('discovery and persistent owner lists are bounded and reject arbitrary dest
     assert.equal(state.state.get(PAUSED_MEDIA_STATE)[2].length, 32);
     await close(state);
     assert.equal(state.calls.filter(call => call.method === 'Play').length, 32);
-    const malformed = await runtime({saved: ['original-bus', 'dead', ['org.example.Other', '../player', ':1.44']]});
+    const malformed = await runtime({players: [{name: 'org.mpris.MediaPlayer2.player', owner: ':1.44', status: 'Paused'}],
+        saved: ['original-bus', 'dead', ['org.example.Other', '../player', ':1.44']]});
+    await pause(malformed, {pausePlaying: false});
     assert.deepEqual(malformed.state.get(PAUSED_MEDIA_STATE)[2], [':1.44']);
     await close(malformed, {resume: false});
+});
+
+test('relock claims live intent before native lock and epoch snapshots finish writing', async () => {
+    const state = await runtime({deferPersistence: true});
+    await pause(state);
+    state.flushPersistence();
+    const oldEpoch = state.state.get(PAUSED_MEDIA_STATE)[1];
+    state.cancellable.cancel();
+    const oldClose = state.media.close();
+    const oldQuery = state.calls.at(-1);
+    const cancellable = new Cancellable();
+    const replacement = new state.PausedMedia(cancellable, state.owner);
+    state.owner.locked = true;
+    const adopted = replacement.pause({pausePlaying: false});
+    state.global.set_runtime_state(LOCKED_STATE, new state.Variant('b', true));
+    assert.equal(state.state.has(LOCKED_STATE), false, 'the old disk snapshot still describes an unlocked session');
+    assert.equal(state.state.get(PAUSED_MEDIA_STATE)[1], oldEpoch);
+    await reply(state, oldQuery, [new state.Variant('s', 'Paused')]);
+    await oldClose;
+    assert.equal(state.calls.filter(call => call.method === 'Play').length, 0);
+    assert.equal(state.owner.intent[1], 'epoch-2');
+    assert.deepEqual([...state.owner.intent[2]], [':1.44']);
+    assert.equal(state.writes.get(PAUSED_MEDIA_STATE)[1], 'epoch-2', 'old cleanup cannot overwrite the replacement snapshot');
+    await drain(state);
+    await adopted;
+    state.owner.locked = false;
+    state.global.set_runtime_state(LOCKED_STATE, null);
+    cancellable.cancel();
+    const restored = replacement.close();
+    await drain(state);
+    await restored;
+    assert.equal(state.owner.intent, null, 'live restoration completes before native deletion');
+    assert.equal(state.state.has(PAUSED_MEDIA_STATE), true);
+    state.flushPersistence();
+    assert.equal(state.state.has(PAUSED_MEDIA_STATE), false);
+    assert.equal(state.calls.filter(call => call.method === 'Play').length, 1);
+});
+
+test('unlock restores media while the previous locked snapshot remains on disk', async () => {
+    const state = await runtime({deferPersistence: true});
+    state.owner.locked = true;
+    state.global.set_runtime_state(LOCKED_STATE, new state.Variant('b', true));
+    await pause(state);
+    state.flushPersistence();
+    state.owner.locked = false;
+    state.global.set_runtime_state(LOCKED_STATE, null);
+    await close(state);
+    assert.equal(state.calls.filter(call => call.method === 'Play').length, 1);
+    assert.equal(state.owner.intent, null);
+    assert.equal(state.state.get(LOCKED_STATE), true, 'native deletion has not completed');
+    assert.equal(state.state.has(PAUSED_MEDIA_STATE), true);
+    state.flushPersistence();
+    assert.equal(state.state.has(LOCKED_STATE), false);
+    assert.equal(state.state.has(PAUSED_MEDIA_STATE), false);
+});
+
+test('concurrent player restorations remove live owners without reading stale disk snapshots', async () => {
+    const state = await runtime({deferPersistence: true, players: [
+        {name: 'org.mpris.MediaPlayer2.first', owner: ':1.44', status: 'Playing'},
+        {name: 'org.mpris.MediaPlayer2.second', owner: ':1.55', status: 'Playing'},
+    ]});
+    await pause(state);
+    state.flushPersistence();
+    await close(state);
+    assert.equal(state.calls.filter(call => call.method === 'Play').length, 2);
+    assert.equal(state.owner.intent, null);
+    assert.equal(state.state.get(PAUSED_MEDIA_STATE)[2].length, 2, 'both prior owners remain in the stale disk snapshot');
+    assert.equal(state.writes.get(PAUSED_MEDIA_STATE), null, 'the final snapshot removes all completed owners');
+    state.flushPersistence();
+    assert.equal(state.state.has(PAUSED_MEDIA_STATE), false);
+});
+
+test('a replacement inherits an unpersisted delivered Pause and owns its late reply', async () => {
+    const state = await runtime({deferPersistence: true});
+    const initial = state.media.pause();
+    await drain(state, {leavePause: true});
+    const pending = state.calls.find(call => call.method === 'Pause');
+    assert.equal(state.state.has(PAUSED_MEDIA_STATE), false, 'no native snapshot has completed');
+    state.cancellable.cancel();
+    const oldClose = state.media.close();
+    const cancellable = new Cancellable();
+    const replacement = new state.PausedMedia(cancellable, state.owner);
+    state.owner.locked = true;
+    const adopted = replacement.pause({pausePlaying: false});
+    await drain(state, {leavePause: true});
+    state.players[0].status = 'Paused';
+    await reply(state, pending, []);
+    await initial;
+    await drain(state);
+    await oldClose;
+    await adopted;
+    assert.equal(state.owner.intent[1], 'epoch-2');
+    assert.deepEqual([...state.owner.intent[2]], [':1.44']);
+    assert.equal(state.calls.filter(call => call.method === 'Pause').length, 1);
+    assert.equal(state.calls.filter(call => call.method === 'Play').length, 0);
+    assert.equal(state.owner.pendingPauses.size, 0);
+    state.owner.locked = false;
+    cancellable.cancel();
+    const restored = replacement.close();
+    await drain(state);
+    await restored;
+    assert.equal(state.owner.intent, null);
+    assert.equal(state.calls.filter(call => call.method === 'Play').length, 1);
+});
+
+test('an in-flight Play is compensated using an unpersisted replacement lock', async () => {
+    const state = await runtime({deferPersistence: true});
+    await pause(state);
+    state.flushPersistence();
+    state.cancellable.cancel();
+    const oldClose = state.media.close();
+    await reply(state, state.calls.at(-1), [new state.Variant('s', 'Paused')]);
+    const oldPlay = state.calls.at(-1);
+    assert.equal(oldPlay.method, 'Play');
+    const cancellable = new Cancellable();
+    const replacement = new state.PausedMedia(cancellable, state.owner);
+    state.owner.locked = true;
+    state.global.set_runtime_state(LOCKED_STATE, new state.Variant('b', true));
+    const adopted = replacement.pause({pausePlaying: false});
+    await reply(state, state.calls.at(-1), ['original-bus']);
+    await reply(state, state.calls.at(-1), [new state.Variant('s', 'Paused')]);
+    await adopted;
+    state.players[0].status = 'Playing';
+    state.signal(':1.44', 'Playing');
+    await reply(state, oldPlay, []);
+    assert.equal(state.calls.at(-1).method, 'Pause');
+    await drain(state);
+    await oldClose;
+    assert.equal(state.players[0].status, 'Paused');
+    assert.equal(state.owner.intent[1], 'epoch-2');
+    assert.deepEqual([...state.owner.intent[2]], [':1.44']);
+    assert.equal(state.state.has(LOCKED_STATE), false, 'the relock snapshot remains unpersisted');
+    state.owner.locked = false;
+    cancellable.cancel();
+    const restored = replacement.close();
+    await drain(state);
+    await restored;
+    assert.equal(state.owner.intent, null);
+    assert.equal(state.calls.filter(call => call.method === 'Play').length, 2);
+});
+
+
+test('a refused replacement grab leaves the preceding restoration eligible and restores only once', async () => {
+    const state = await runtime({deferPersistence: true});
+    await pause(state);
+    state.cancellable.cancel();
+    const prior = state.media.close();
+    const query = state.calls.at(-1);
+    const replacementCancellation = new Cancellable();
+    const replacement = new state.PausedMedia(replacementCancellation, state.owner);
+    assert.equal(state.owner.current, state.media, 'construction cannot replace an active restoration');
+    assert.equal(state.owner.intent[1], 'epoch-1');
+    replacementCancellation.cancel();
+    const refused = replacement.close();
+    assert.equal(state.calls.at(-1), query, 'the refused grab waits for the preceding restoration');
+    await reply(state, query, [new state.Variant('s', 'Paused')]);
+    await drain(state);
+    await Promise.all([prior, refused]);
+    assert.equal(state.calls.filter(call => call.method === 'Play').length, 1);
+    assert.equal(state.calls.filter(call => call.method === 'GetId').length, 1);
+    assert.equal(state.owner.intent, null);
+    assert.equal(state.owner.current, null);
+    assert.equal(state.players[0].status, 'Playing');
+});
+
+test('native unlock before an old compensating Pause completes restores inherited media exactly once', async () => {
+    const state = await runtime({deferPersistence: true});
+    await pause(state);
+    state.cancellable.cancel();
+    const prior = state.media.close();
+    await reply(state, state.calls.at(-1), [new state.Variant('s', 'Paused')]);
+    const deliveredPlay = state.calls.at(-1);
+    const nativeScope = new state.PausedMedia(new Cancellable(), state.owner);
+    state.owner.locked = true;
+    state.players[0].status = 'Playing';
+    await reply(state, deliveredPlay, []);
+    const compensation = state.calls.at(-1);
+    assert.equal(compensation.method, 'Pause');
+    state.owner.locked = false;
+    const restored = nativeScope.close();
+    const duplicate = new state.PausedMedia(new Cancellable(), state.owner).close();
+    assert.equal(state.calls.at(-1), compensation, 'native unlock waits for the delivered compensation');
+    await drain(state);
+    await Promise.all([prior, restored, duplicate]);
+    assert.equal(state.players[0].status, 'Playing');
+    assert.equal(state.calls.filter(call => call.method === 'Play').length, 2);
+    assert.equal(state.calls.filter(call => call.method === 'Pause').length, 2);
+    assert.equal(state.calls.filter(call => call.method === 'GetId').length, 2);
+    assert.equal(state.owner.intent, null);
+    assert.equal(state.owner.current, null);
+});
+
+test('an unstarted inherited media scope restores only after verifying its original bus identity', async t => {
+    for (const savedBus of ['original-bus', 'previous-bus']) {
+        await t.test(savedBus, async () => {
+            const state = await runtime({saved: [savedBus, 'crashed', [':1.44']], players: [
+                {name: 'org.mpris.MediaPlayer2.player', owner: ':1.44', status: 'Paused'},
+            ]});
+            state.cancellable.cancel();
+            const restored = state.media.close();
+            assert.equal(state.calls.at(-1).method, 'GetId');
+            assert.equal(state.calls.at(-1).cancellable, null, 'restoration outlives cancelled activation');
+            await drain(state);
+            await restored;
+            assert.equal(state.calls.filter(call => call.method === 'Play').length, savedBus === 'original-bus' ? 1 : 0);
+            assert.equal(state.calls.filter(call => call.method === 'ListNames').length, 0);
+            assert.equal(state.owner.intent, null);
+            assert.equal(state.owner.current, null);
+        });
+    }
+});
+
+test('a newer active media scope wins while unstarted recovery is verifying the bus', async () => {
+    const state = await runtime({deferPersistence: true, saved: ['original-bus', 'crashed', [':1.44']], players: [
+        {name: 'org.mpris.MediaPlayer2.player', owner: ':1.44', status: 'Paused'},
+    ]});
+    const obsolete = state.media.close();
+    const verification = state.calls.at(-1);
+    const cancellable = new Cancellable();
+    const replacement = new state.PausedMedia(cancellable, state.owner);
+    state.owner.locked = true;
+    const adopted = replacement.pause({pausePlaying: false});
+    await reply(state, verification, ['original-bus']);
+    await obsolete;
+    assert.equal(state.owner.current, replacement);
+    assert.equal(state.owner.intent[1], 'epoch-2');
+    assert.equal(state.calls.filter(call => call.method === 'Play').length, 0);
+    await drain(state);
+    await adopted;
+    state.owner.locked = false;
+    cancellable.cancel();
+    const restored = replacement.close();
+    await drain(state);
+    await restored;
+    assert.equal(state.calls.filter(call => call.method === 'Play').length, 1);
+    assert.equal(state.owner.intent, null);
+});
+
+test('an empty inherited intent is removed without acquiring the bus', async () => {
+    const state = await runtime({saved: ['original-bus', 'crashed', []]});
+    Object.defineProperty(state.DBus, 'session', {get: () => assert.fail('empty intent has no eligible destinations')});
+    await state.media.close();
+    assert.equal(state.owner.intent, null);
+    assert.equal(state.owner.current, null);
+    assert.equal(state.calls.length, 0);
+});
+
+
+test('native locking without a replacement privacy session prevents a pending restoration Play', async () => {
+    const state = await runtime({deferPersistence: true});
+    await pause(state);
+    state.cancellable.cancel();
+    const prior = state.media.close();
+    const query = state.calls.at(-1);
+    state.owner.locked = true;
+    await reply(state, query, [new state.Variant('s', 'Paused')]);
+    await prior;
+    assert.equal(state.calls.filter(call => call.method === 'Play').length, 0);
+    assert.equal(state.owner.current, null);
+    assert.deepEqual([...state.owner.intent[2]], [':1.44']);
+    state.owner.locked = false;
+    const restored = new state.PausedMedia(new Cancellable(), state.owner).close();
+    await drain(state);
+    await restored;
+    assert.equal(state.calls.filter(call => call.method === 'Play').length, 1);
+    assert.equal(state.owner.intent, null);
+});
+
+test('disable discards an unstarted inherited intent without acquiring the bus', async () => {
+    const state = await runtime({saved: ['original-bus', 'crashed', [':1.44']]});
+    Object.defineProperty(state.DBus, 'session', {get: () => assert.fail('disabled recovery cannot acquire a bus')});
+    await state.media.close({resume: false});
+    assert.equal(state.owner.intent, null);
+    assert.equal(state.owner.current, null);
+    assert.equal(state.state.has(PAUSED_MEDIA_STATE), false);
+});
+
+test('disable revokes pending restoration and compensates an already delivered Play', async t => {
+    for (const boundary of ['query', 'Play']) {
+        await t.test(boundary, async () => {
+            const state = await runtime({deferPersistence: true});
+            await pause(state);
+            state.cancellable.cancel();
+            const restored = state.media.close();
+            let pending = state.calls.at(-1);
+            if (boundary === 'Play') {
+                await reply(state, pending, [new state.Variant('s', 'Paused')]);
+                pending = state.calls.at(-1);
+            }
+            assert.equal(state.media.close({resume: false}), restored);
+            assert.equal(state.owner.intent, null, 'revocation is synchronous');
+            assert.equal(state.owner.current, null);
+            if (boundary === 'Play')
+                state.players[0].status = 'Playing';
+            await reply(state, pending, boundary === 'Play' ? [] : [new state.Variant('s', 'Paused')]);
+            await drain(state);
+            await restored;
+            assert.equal(state.players[0].status, 'Paused');
+            assert.equal(state.calls.filter(call => call.method === 'Play').length, boundary === 'Play' ? 1 : 0);
+            assert.equal(state.calls.filter(call => call.method === 'Pause').length, boundary === 'Play' ? 2 : 1);
+            assert.equal(state.owner.intent, null);
+            assert.equal(state.owner.current, null);
+        });
+    }
+});
+
+test('revoking an obsolete restoration cannot discard a newer active owner', async () => {
+    const state = await runtime();
+    await pause(state);
+    state.cancellable.cancel();
+    const prior = state.media.close();
+    const query = state.calls.at(-1);
+    const cancellable = new Cancellable();
+    const replacement = new state.PausedMedia(cancellable, state.owner);
+    state.owner.locked = true;
+    const adopted = replacement.pause({pausePlaying: false});
+    state.media.close({resume: false});
+    assert.equal(state.owner.current, replacement);
+    assert.equal(state.owner.intent[1], 'epoch-2');
+    await reply(state, query, [new state.Variant('s', 'Paused')]);
+    await drain(state);
+    await Promise.all([prior, adopted]);
+    assert.equal(state.calls.filter(call => call.method === 'Play').length, 0);
+    state.owner.locked = false;
+    cancellable.cancel();
+    const restored = replacement.close();
+    await drain(state);
+    await restored;
+    assert.equal(state.calls.filter(call => call.method === 'Play').length, 1);
+    assert.equal(state.owner.intent, null);
+});
+
+
+test('inherited restoration deduplicates and rejects arbitrary destinations before querying them', async () => {
+    const state = await runtime({saved: ['original-bus', 'crashed', ['org.example.Other', ':1.44', ':1.44', '../player']], players: [
+        {name: 'org.mpris.MediaPlayer2.player', owner: ':1.44', status: 'Paused'},
+    ]});
+    const restored = state.media.close();
+    await drain(state);
+    await restored;
+    assert.equal(state.calls.filter(call => call.method === 'Get').length, 1);
+    assert.equal(state.calls.filter(call => call.method === 'Play').length, 1);
+    assert.equal(state.calls.find(call => call.method === 'Play').destination, ':1.44');
+    assert.equal(state.owner.intent, null);
+});
+
+test('revoking an unstarted scope waiting for compensation cannot claim inherited intent afterward', async () => {
+    const state = await runtime();
+    await pause(state);
+    state.cancellable.cancel();
+    const prior = state.media.close();
+    await reply(state, state.calls.at(-1), [new state.Variant('s', 'Paused')]);
+    const delivered = state.calls.at(-1);
+    state.owner.locked = true;
+    state.players[0].status = 'Playing';
+    await reply(state, delivered, []);
+    state.owner.locked = false;
+    const recovery = new state.PausedMedia(new Cancellable(), state.owner);
+    const restored = recovery.close();
+    recovery.close({resume: false});
+    await drain(state);
+    await Promise.all([prior, restored]);
+    assert.equal(state.calls.filter(call => call.method === 'Play').length, 1);
+    assert.equal(state.calls.filter(call => call.method === 'GetId').length, 1);
+    assert.equal(state.players[0].status, 'Paused');
+    assert.equal(state.owner.current, null);
+    assert.equal(state.owner.intent[1], 'epoch-1', 'revoked passive recovery leaves prior intent ownership untouched');
+});
+
+
+test('an active successor unlock waits for an old compensating Pause before restoring playback', async () => {
+    const state = await runtime({deferPersistence: true});
+    await pause(state);
+    state.cancellable.cancel();
+    const prior = state.media.close();
+    await reply(state, state.calls.at(-1), [new state.Variant('s', 'Paused')]);
+    const oldPlay = state.calls.at(-1);
+    const cancellation = new Cancellable();
+    const replacement = new state.PausedMedia(cancellation, state.owner);
+    state.owner.locked = true;
+    const adopted = replacement.pause({pausePlaying: false});
+    await reply(state, state.calls.at(-1), ['original-bus']);
+    await reply(state, state.calls.at(-1), [new state.Variant('s', 'Paused')]);
+    await adopted;
+    state.players[0].status = 'Playing';
+    state.signal(':1.44', 'Playing');
+    assert.deepEqual([...state.owner.intent[2]], []);
+    await reply(state, oldPlay, []);
+    const compensation = state.calls.at(-1);
+    assert.equal(compensation.method, 'Pause');
+    assert.equal(state.owner.pendingPauses.size, 1, 'compensation uses the existing delivered-Pause ownership');
+    assert.deepEqual([...state.owner.intent[2]], [':1.44'], 'successor retains possibly completed Pause before unlock');
+    state.owner.locked = false;
+    cancellation.cancel();
+    const restored = replacement.close();
+    assert.equal(state.calls.at(-1), compensation, 'successor waits before querying playback');
+    assert.notEqual(state.owner.intent, null);
+    await drain(state);
+    await Promise.all([prior, restored]);
+    assert.equal(state.players[0].status, 'Playing');
+    assert.equal(state.calls.filter(call => call.method === 'Play').length, 2);
+    assert.equal(state.owner.intent, null);
+    assert.equal(state.owner.current, null);
+    assert.equal(state.owner.pendingPauses.size, 0);
 });

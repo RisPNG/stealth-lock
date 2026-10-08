@@ -1,4 +1,4 @@
-"""Reject native/JS warnings and errors except exact counts declared by shell scenarios."""
+"""Reject native diagnostics except declared failures and one precise upstream metadata warning."""
 
 import json
 import pathlib
@@ -11,12 +11,19 @@ diagnostic = re.compile(
     r'JS ERROR|\b(?:St|Gjs|Gjs-Console|GLib-GObject|GLib-GIO|GLib|Clutter|Gtk|Pango)-(?:CRITICAL|WARNING)\b'
     r'|(?:allocation|allocate).*warning|actor.*(?:allocation|allocate)'
     r'|cogl_framebuffer_set_viewport: assertion'
-    r'|GNOME Shell-(?:CRITICAL|WARNING).*Stealth Lock'
+    r'|GNOME Shell-(?:CRITICAL|WARNING)'
     r'|libmutter-(?:CRITICAL|WARNING).*keybinding'
 )
 patterns = [(re.compile(entry['pattern']), entry['count']) for entry in expected]
 observed = [0] * len(patterns)
 unexpected = []
+upstream_pids = set()
+# GJS 1.84.2 gi/object.cpp uses GValue when the AccountsService int property has an enum getter.
+upstream_warning = re.compile(
+    r'^\(gnome-shell:(\d+)\): Gjs-WARNING \*\*: \d{2}:\d{2}:\d{2}\.\d+: '
+    r'Type gint32 of property AccountsService\.User::password-mode does not match return type '
+    r'interface of getter get_password_mode\. Falling back to slow path$'
+)
 
 for number, line in enumerate((root / 'logs' / 'shell.log').read_text().splitlines(), 1):
     if not diagnostic.search(line):
@@ -26,7 +33,11 @@ for number, line in enumerate((root / 'logs' / 'shell.log').read_text().splitlin
             observed[index] += 1
             break
     else:
-        unexpected.append(f'{number}: {line}')
+        upstream = upstream_warning.fullmatch(line)
+        if upstream and upstream[1] not in upstream_pids:
+            upstream_pids.add(upstream[1])
+        else:
+            unexpected.append(f'{number}: {line}')
 
 for line in unexpected:
     print(line, file=sys.stderr)
@@ -37,4 +48,4 @@ for index, (pattern, count) in enumerate(patterns):
 
 if unexpected:
     sys.exit(1)
-print(f'shell logs passed ({sum(observed)} expected diagnostics)')
+print(f'shell logs passed ({sum(observed)} expected diagnostics, {len(upstream_pids)} upstream metadata warnings)')

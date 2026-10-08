@@ -131,12 +131,16 @@ export const tests = {
             const first = await protect(extension);
             extension.disable();
             assert(first._closed && !extension._session, 'Disable releases old session');
-            assert(global.get_runtime_state('b', 'stealth-lock@user.locked')?.deep_unpack(), 'Recovery marker retained');
+            assert(extension._runtime.locked, 'Recovery marker retained immediately');
+            await waitFor(() => global.get_runtime_state('b', 'stealth-lock@user.locked')?.deep_unpack(),
+                'Retained recovery marker persisted');
             extension.enable();
             await waitFor(() => extension._session?._ready, 'Re-enable restores protection');
             assert(extension._session !== first, 'Recovered screen has fresh ownership');
             extension._session.close();
-            equal(global.get_runtime_state('b', 'stealth-lock@user.locked'), null, 'Successful dismissal clears marker');
+            assert(!extension._runtime.locked, 'Successful dismissal clears live marker immediately');
+            await waitFor(() => global.get_runtime_state('b', 'stealth-lock@user.locked') === null,
+                'Successful dismissal removes persisted marker');
         } finally {
             if (shield)
                 shield.lock = original;
@@ -153,7 +157,9 @@ export const tests = {
         assert(session._nativeLock && !session._overlay && !session._input, 'Privacy UI yields after native confirmation');
         Main.screenShield.deactivate(true);
         await waitFor(() => Main.sessionMode.currentMode === 'user' && extension._session === null, 'Native unlock completes session');
-        equal(global.get_runtime_state('b', 'stealth-lock@user.locked'), null, 'Native unlock clears privacy marker');
+        assert(!extension._runtime.locked, 'Native unlock clears live privacy marker');
+        await waitFor(() => global.get_runtime_state('b', 'stealth-lock@user.locked') === null,
+            'Native unlock removes persisted privacy marker');
         return undefined;
     },
 

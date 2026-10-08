@@ -1,10 +1,15 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import {loadModule} from './harness.js';
+import {Cancellable, deferred, loadModule} from './harness.js';
 
-async function extensionRuntime({wasLocked = false, nativeLocked = false, debugMode = false, deferRestore = false, systemAuth = false, systemAvailable = false, systemThrows = false} = {}) {
+async function extensionRuntime({wasLocked = false, nativeLocked = false, debugMode = false, deferRestore = false,
+    systemAuth = false, systemAvailable = false, systemThrows = false, deferPersistence = false, savedIntent = null, restoration} = {}) {
     const state = new Map(wasLocked ? [['stealth-lock@user.locked', true]] : []);
+    if (savedIntent)
+        state.set('stealth-lock@user.media', savedIntent);
+    const writes = new Map();
+    const reads = [];
     const events = [];
     let nativeChange;
     let pendingRestore;
@@ -20,16 +25,22 @@ async function extensionRuntime({wasLocked = false, nativeLocked = false, debugM
         getSettings() { return settings; }
     }
     class LockSession {
-        constructor({settings: suppliedSettings, path, shortcuts, onClosed}) {
+        constructor({settings: suppliedSettings, path, shortcuts, runtime, onClosed}) {
             assert.equal(suppliedSettings, settings);
             assert.equal(path, '/extension');
             this.shortcuts = shortcuts;
+            this.runtime = runtime;
             this.onClosed = onClosed;
             this.nativeLocked = false;
             for (const key of ['_nativeLock', '_handoff', 'cancellable'])
                 Object.defineProperty(this, key, {get: () => assert.fail(`Extension must not inspect session ${key}`)});
         }
-        start() { events.push('start'); }
+        start() {
+            this.runtime.locked = true;
+            this.runtime.restorePrivacy = true;
+            global.set_runtime_state('stealth-lock@user.locked', true);
+            events.push('start');
+        }
         systemLockChanged(locked) {
             events.push(['native-change', locked]);
             if (locked)
@@ -43,9 +54,39 @@ async function extensionRuntime({wasLocked = false, nativeLocked = false, debugM
         }
         close(options = {}) {
             events.push(['close', options]);
-            if (options.clearState !== false)
-                state.delete('stealth-lock@user.locked');
+            if (options.clearState !== false) {
+                this.runtime.locked = false;
+                this.runtime.restorePrivacy = false;
+                global.set_runtime_state('stealth-lock@user.locked', null);
+            }
             this.onClosed();
+        }
+    }
+    class PausedMedia {
+        constructor(cancellable, owner) {
+            assert.ok(cancellable instanceof Cancellable);
+            this.owner = owner;
+        }
+        async close({resume = true} = {}) {
+            if (!resume) {
+                if (!this.owner.current || this.owner.current === this) {
+                    this.owner.intent = null;
+                    this.owner.current = null;
+                    events.push('media-discard');
+                }
+                return;
+            }
+            if (this.owner.current)
+                return;
+            this.owner.current = this;
+            events.push('media-restore');
+            if (restoration)
+                await restoration.promise;
+            if (this.owner.current === this) {
+                if (!this.owner.locked)
+                    this.owner.intent = null;
+                this.owner.current = null;
+            }
         }
     }
     const Main = {
@@ -60,16 +101,29 @@ async function extensionRuntime({wasLocked = false, nativeLocked = false, debugM
         sessionMode: {currentMode: nativeLocked ? 'unlock-dialog' : 'user', isLocked: nativeLocked},
     };
     const global = {
-        get_runtime_state: (_type, key) => state.has(key) ? {deep_unpack: () => state.get(key)} : null,
-        set_runtime_state: (key, value) => value === null ? state.delete(key) : state.set(key, value),
+        get_runtime_state: (_type, key) => {
+            reads.push(key);
+            return state.has(key) ? {deep_unpack: () => structuredClone(state.get(key))} : null;
+        },
+        set_runtime_state: (key, supplied) => {
+            const value = supplied?.value ?? supplied;
+            if (deferPersistence)
+                writes.set(key, value);
+            else if (value === null)
+                state.delete(key);
+            else
+                state.set(key, value);
+        },
     };
     const module = await loadModule('extension.js', {
+        'gi://Gio': {default: {Cancellable}},
         'gi://Meta': {default: {KeyBindingFlags: {NONE: 0}, KeyBindingAction: {NONE: 0}}},
         'gi://Shell': {default: {ActionMode: {NORMAL: 1, OVERVIEW: 2, NONE: 0}}},
         'resource:///org/gnome/shell/ui/main.js': Main,
         'resource:///org/gnome/shell/extensions/extension.js': {Extension},
         './shell/lockSession.js': {LockSession},
-        './shared/runtime-state.js': {LOCKED_STATE: 'stealth-lock@user.locked'},
+        './shell/media.js': {PausedMedia},
+        './shared/runtime-state.js': {LOCKED_STATE: 'stealth-lock@user.locked', PAUSED_MEDIA_STATE: 'stealth-lock@user.media'},
         './shared/presets.js': {initializeEffectPresets: () => {}},
         './shell/integration.js': {handoffToSystemLock: () => {
             events.push('system-lock-request');
@@ -88,7 +142,7 @@ async function extensionRuntime({wasLocked = false, nativeLocked = false, debugM
         }},
     }, {global, console: {error: message => events.push(message)}});
     const extension = new module.default();
-    return {extension, events, state, nativeChange: locked => nativeChange(locked), restore: () => pendingRestore?.()};
+    return {extension, events, state, writes, reads, nativeChange: locked => nativeChange(locked), restore: () => pendingRestore?.(), sessionMode: Main.sessionMode};
 }
 
 test('reload within the login session reapplies an active privacy screen', async () => {
@@ -108,6 +162,44 @@ test('a clean login or authenticated dismissal does not create a recovery screen
     extension.enable();
     assert.ok(!events.includes('start'));
     extension.disable();
+});
+
+test('disable and re-enable retain live protection before native snapshots finish writing', async () => {
+    const savedIntent = ['bus', 'previous-epoch', [':1.44']];
+    const state = await extensionRuntime({wasLocked: true, deferRestore: true, deferPersistence: true, savedIntent});
+    state.extension.enable();
+    const owner = state.extension._runtime;
+    assert.deepEqual(owner.intent, savedIntent, 'fresh ownership hydrates the prior native media snapshot');
+    state.extension.lock();
+    assert.equal(owner.locked, true);
+    assert.equal(state.extension._session.runtime, owner);
+    assert.equal(state.state.get('stealth-lock@user.locked'), true, 'the preceding snapshot remains while new writes are pending');
+    const pendingPauses = owner.pendingPauses;
+    state.extension.disable();
+    state.extension.enable();
+    state.restore();
+    assert.equal(state.extension._runtime, owner);
+    assert.equal(state.extension._runtime.pendingPauses, pendingPauses);
+    assert.equal(state.events.filter(event => event === 'start').length, 2);
+    assert.deepEqual(state.reads, ['stealth-lock@user.locked', 'stealth-lock@user.media']);
+    state.extension.disable();
+});
+
+test('native unlock cancels deferred recovery even before its disk marker is deleted', async () => {
+    const state = await extensionRuntime({wasLocked: true, deferRestore: true, deferPersistence: true});
+    state.extension.enable();
+    const owner = state.extension._runtime;
+    state.nativeChange(false);
+    assert.equal(owner.locked, false);
+    assert.equal(state.state.get('stealth-lock@user.locked'), true);
+    state.restore();
+    assert.ok(!state.events.includes('start'));
+    state.extension.disable();
+    state.extension.enable();
+    assert.equal(state.extension._runtime, owner);
+    assert.ok(!state.events.includes('start'));
+    assert.deepEqual(state.reads, ['stealth-lock@user.locked', 'stealth-lock@user.media']);
+    state.extension.disable();
 });
 
 test('recovery does not interfere with an existing native lock and clears after native unlock', async () => {
@@ -308,5 +400,114 @@ test('a native system-lock exception during recovery reports failure without dis
     assert.ok(state.events.some(event => Array.isArray(event) && event[0] === 'notify-error'));
     assert.ok(!state.events.includes('settings-disconnect'));
     assert.equal(state.state.get('stealth-lock@user.locked'), true);
+    state.extension.disable();
+});
+
+
+test('fresh enable under native lock restores inherited media only once after duplicate unlock notifications', async () => {
+    const restoration = deferred();
+    const state = await extensionRuntime({wasLocked: true, nativeLocked: true, deferPersistence: true,
+        savedIntent: ['original-bus', 'crashed', [':1.44']], restoration});
+    state.extension.enable();
+    assert.ok(!state.events.includes('start'));
+    assert.ok(!state.events.includes('media-restore'));
+    state.nativeChange(false);
+    state.nativeChange(false);
+    assert.equal(state.extension._runtime.locked, false);
+    assert.equal(state.events.filter(event => event === 'media-restore').length, 1);
+    assert.notEqual(state.extension._runtime.current, null);
+    restoration.resolve();
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(state.extension._runtime.intent, null);
+    assert.equal(state.extension._runtime.current, null);
+    assert.equal(state.reads.length, 2, 'recovery does not consult asynchronous persistence again');
+    state.extension.disable();
+});
+
+
+test('disable discards inherited media before native unlock without starting restoration', async () => {
+    const state = await extensionRuntime({wasLocked: true, nativeLocked: true,
+        savedIntent: ['original-bus', 'crashed', [':1.44']]});
+    state.extension.enable();
+    state.extension.disable();
+    assert.equal(state.extension._runtime.intent, null);
+    assert.equal(state.extension._runtime.current, null);
+    assert.equal(state.events.filter(event => event === 'media-discard').length, 1);
+    assert.ok(!state.events.includes('media-restore'));
+});
+
+test('disable releases a no-session restoration owner while its completion is pending', async () => {
+    const restoration = deferred();
+    const state = await extensionRuntime({wasLocked: true, nativeLocked: true,
+        savedIntent: ['original-bus', 'crashed', [':1.44']], restoration});
+    state.extension.enable();
+    state.nativeChange(false);
+    assert.notEqual(state.extension._runtime.current, null);
+    state.extension.disable();
+    assert.equal(state.extension._runtime.intent, null);
+    assert.equal(state.extension._runtime.current, null);
+    restoration.resolve();
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(state.extension._runtime.current, null);
+    assert.equal(state.extension._runtime.intent, null);
+});
+
+test('native locking is authoritative without a privacy session and clean unlocking adds no privacy screen', async () => {
+    const state = await extensionRuntime({deferPersistence: true});
+    state.extension.enable();
+    state.nativeChange(true);
+    assert.equal(state.extension._runtime.locked, true);
+    assert.equal(state.extension._runtime.restorePrivacy, false);
+    assert.equal(state.writes.has('stealth-lock@user.locked'), false);
+    assert.equal(state.state.has('stealth-lock@user.locked'), false);
+    state.nativeChange(false);
+    assert.equal(state.extension._runtime.locked, false);
+    assert.equal(state.writes.get('stealth-lock@user.locked'), null);
+    assert.ok(!state.events.includes('start'));
+    assert.ok(!state.events.includes('media-restore'));
+    state.extension.disable();
+});
+
+
+test('an unrelated native lock cannot request privacy recovery across disable and re-enable', async () => {
+    const state = await extensionRuntime({deferPersistence: true});
+    state.extension.enable();
+    state.nativeChange(true);
+    assert.equal(state.extension._runtime.locked, true);
+    assert.equal(state.extension._runtime.restorePrivacy, false);
+    const owner = state.extension._runtime;
+    state.extension.disable();
+    state.sessionMode.isLocked = false;
+    state.sessionMode.currentMode = 'user';
+    state.extension.enable();
+    assert.equal(state.extension._runtime, owner);
+    assert.equal(owner.locked, false, 're-enable observes the current native protection state');
+    assert.equal(owner.restorePrivacy, false);
+    assert.ok(!state.events.includes('start'));
+    assert.equal(state.reads.length, 2);
+    assert.equal(state.writes.has('stealth-lock@user.locked'), false);
+    state.extension.disable();
+});
+
+
+test('fresh unlocked enable restores inherited media exactly once without creating a privacy session', async () => {
+    const restoration = deferred();
+    const state = await extensionRuntime({deferPersistence: true,
+        savedIntent: ['original-bus', 'crashed-after-dismissal', [':1.44']], restoration});
+    state.extension.enable();
+    assert.equal(state.extension._runtime.locked, false);
+    assert.equal(state.extension._runtime.restorePrivacy, false);
+    assert.equal(state.extension._session, null);
+    assert.equal(state.events.filter(event => event === 'media-restore').length, 1);
+    assert.ok(!state.events.includes('start'));
+    state.nativeChange(false);
+    state.nativeChange(false);
+    assert.equal(state.events.filter(event => event === 'media-restore').length, 1);
+    restoration.resolve();
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(state.extension._runtime.intent, null);
+    assert.equal(state.extension._runtime.current, null);
+    assert.equal(state.extension._session, null);
+    assert.equal(state.reads.length, 2);
     state.extension.disable();
 });

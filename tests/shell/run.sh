@@ -12,6 +12,7 @@ export SLH_ENABLE_EXT=1
 cleanup() {
     local status=$?
     if [[ "$status" -ne 0 ]]; then
+        "$here/run-shell.sh" status || true
         tail -n 60 "$SLH_ROOT/logs/shell.log" "$SLH_ROOT/logs/scope.log" >&2 || true
     fi
     if [[ "${SLH_KEEP:-0}" == 1 ]]; then
@@ -33,25 +34,29 @@ trap 'exit 143' TERM
 '
 mise exec -- /usr/bin/python3 -I -B "$here/check-log.py" "$SLH_ROOT"
 "$here/eval.sh" -t 10 -b '
-    const {delay, waitFor} = await import(Gio.File.new_for_path(GLib.getenv("SLH_HARNESS_DIR")).get_child("support.js").get_uri());
+    const {waitFor} = await import(Gio.File.new_for_path(GLib.getenv("SLH_HARNESS_DIR")).get_child("support.js").get_uri());
     const extension = Main.extensionManager.lookup("stealth-lock@user").stateObj;
     extension.lock();
     await waitFor(() => extension._session?._ready, "Privacy screen before crash");
-    await delay(250);
-    if (!global.get_runtime_state("b", "stealth-lock@user.locked")?.deep_unpack())
-        throw new Error("Native runtime marker absent before crash");
+    if (!extension._runtime.locked)
+        throw new Error("Authoritative runtime marker absent before crash");
+    await waitFor(() => global.get_runtime_state("b", "stealth-lock@user.locked")?.deep_unpack(),
+        "Native runtime marker persisted before crash");
     return "private compositor ready for abrupt crash";
 '
+"$here/run-shell.sh" status
 "$here/run-shell.sh" crash-restart
 "$here/eval.sh" -t 10 -b '
     const {waitFor} = await import(Gio.File.new_for_path(GLib.getenv("SLH_HARNESS_DIR")).get_child("support.js").get_uri());
     const extension = Main.extensionManager.lookup("stealth-lock@user").stateObj;
     await waitFor(() => extension._session?._ready, "Privacy screen recovered after SIGKILL");
-    if (!global.get_runtime_state("b", "stealth-lock@user.locked")?.deep_unpack() || Main.actionMode !== Shell.ActionMode.NONE)
-        throw new Error(`Abrupt restart: marker=${global.get_runtime_state("b", "stealth-lock@user.locked")?.deep_unpack()}, mode=${Main.actionMode}, modalCount=${Main.modalCount}`);
+    if (!extension._runtime.locked || !global.get_runtime_state("b", "stealth-lock@user.locked")?.deep_unpack() || Main.actionMode !== Shell.ActionMode.NONE)
+        throw new Error(`Abrupt restart: live=${extension._runtime.locked}, marker=${global.get_runtime_state("b", "stealth-lock@user.locked")?.deep_unpack()}, mode=${Main.actionMode}, modalCount=${Main.modalCount}`);
     extension._session.close();
-    if (global.get_runtime_state("b", "stealth-lock@user.locked") !== null)
-        throw new Error("Recovered dismissal did not clear runtime marker");
+    if (extension._runtime.locked)
+        throw new Error("Recovered dismissal did not clear authoritative runtime marker");
+    await waitFor(() => global.get_runtime_state("b", "stealth-lock@user.locked") === null,
+        "Recovered native runtime marker removed");
     return "abrupt private compositor crash/restart recovery passed";
 '
 mise exec -- /usr/bin/python3 -I -B "$here/check-log.py" "$SLH_ROOT"

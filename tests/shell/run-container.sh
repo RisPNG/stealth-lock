@@ -49,16 +49,23 @@ docker exec "$identifier" bash -eu -c '
         echo "Fixture account expiry helper failed: $?" >&2
     fi
     sed -n -E "/^(Name|Uid|Gid|Cap(Inh|Prm|Eff|Bnd|Amb)|NoNewPrivs):/p" /proc/1/status
-    systemctl show user@1000.service --property=User --property=PAMName \
+    systemctl show user@1000.service --property=User --property=PAMName --property=Environment \
         --property=CapabilityBoundingSet --property=NoNewPrivileges --property=RestrictSUIDSGID
     systemctl cat user@1000.service | head -n 80
     for attempt in $(seq 1 60); do
         if systemctl is-active --quiet user@1000.service && test -S /run/user/1000/bus; then
+            systemctl is-active user-runtime-dir@1000.service
+            stat --format="%n mode=%a owner=%u:%g" /run/user/1000
+            test "$(stat --format=%a:%u:%g /run/user/1000)" = 700:1000:1000
             exit 0
         fi
         sleep 1
     done
     systemctl status user@1000.service || true
+    systemctl status user-runtime-dir@1000.service || true
+    if test -d /run/user/1000; then
+        stat --format="%n mode=%a owner=%u:%g" /run/user/1000
+    fi
     journalctl --unit=user@1000.service --lines=60 --no-pager
     exit 1
 '

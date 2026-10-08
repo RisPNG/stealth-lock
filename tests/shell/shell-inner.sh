@@ -9,7 +9,7 @@ esac
 printf '%s\n' "$DBUS_SESSION_BUS_ADDRESS" > "$SLH_ROOT/run/bus-address.tmp"
 mv "$SLH_ROOT/run/bus-address.tmp" "$SLH_ROOT/run/bus-address"
 
-args=(--headless --wayland-display=wayland-test --sm-disable)
+args=(--headless --wayland-display=wayland-test)
 for monitor in ${SLH_MONITOR:-1280x720}; do
     args+=("--virtual-monitor=$monitor")
 done

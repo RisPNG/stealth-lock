@@ -90,6 +90,11 @@ write_settings() {
 enabled-extensions=[$enabled]
 disable-user-extensions=false
 welcome-dialog-last-shown-version='99.0'
+
+[org/gnome/desktop/input-sources]
+sources=[('ibus', 'xkb:us::eng')]
+mru-sources=[('ibus', 'xkb:us::eng')]
+per-window=false
 KEYFILE
     if [ -n "${SLH_KEYFILE_EXTRA:-}" ]; then cat "$SLH_KEYFILE_EXTRA" >> "$kf"; fi
 
@@ -159,7 +164,7 @@ cmd_start() {
             XDG_RUNTIME_DIR="$SLH_RT" XDG_DATA_DIRS=/usr/local/share:/usr/share XDG_CONFIG_DIRS=/etc/xdg \
             XDG_SESSION_TYPE=wayland XDG_CURRENT_DESKTOP=GNOME WAYLAND_DISPLAY=wayland-test \
             GSETTINGS_BACKEND=keyfile NO_AT_BRIDGE=1 GTK_A11Y=none \
-            LIBGL_ALWAYS_SOFTWARE=true GBM_ALWAYS_SOFTWARE=true 'VK_LOADER_DRIVERS_SELECT=lvp_*' \
+            LIBGL_ALWAYS_SOFTWARE=true LP_NUM_THREADS=1 GBM_ALWAYS_SOFTWARE=true 'VK_LOADER_DRIVERS_SELECT=lvp_*' \
             __EGL_VENDOR_LIBRARY_FILENAMES=/usr/share/glvnd/egl_vendor.d/50_mesa.json __GLX_VENDOR_LIBRARY_NAME=mesa \
             GBM_BACKENDS_PATH="$SLH_ROOT/run/no-gbm-backends" \
             SLH_ROOT="$SLH_ROOT" SLH_HARNESS_DIR="$SLH_HARNESS_DIR" SLH_PASSWORD="${SLH_PASSWORD:-harness-secret}" \
@@ -177,6 +182,20 @@ cmd_start() {
             exit 1
         fi
         if [ -s "$SLH_ROOT/run/bus-address" ] && [ "$("$SLH_HARNESS_DIR/eval.sh" -t 3 '!Main.layoutManager._startingUp' 2>/dev/null)" = true ]; then
+            if ! "$SLH_HARNESS_DIR/eval.sh" -t 12 -b '
+                const {getIBusManager} = await import("resource:///org/gnome/shell/misc/ibusManager.js");
+                const {getInputSourceManager} = await import("resource:///org/gnome/shell/ui/status/keyboard.js");
+                const {waitFor} = await import(Gio.File.new_for_path(GLib.getenv("SLH_HARNESS_DIR")).get_child("support.js").get_uri());
+                const ibus = getIBusManager();
+                const sources = getInputSourceManager();
+                await waitFor(() => ibus._ready && ibus._currentEngineName === "xkb:us::eng" &&
+                    sources.currentSource?.type === "ibus" && sources.currentSource.id === "xkb:us::eng",
+                    "Native IBus US engine selected", 10000);
+                return "native IBus US engine ready";
+            '; then
+                cmd_stop
+                exit 1
+            fi
             echo "ready after ~$((i / 2))s"
             return 0
         fi

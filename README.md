@@ -72,9 +72,9 @@ Stealth Lock's visible-desktop mode depends on the extension running. Use GNOME'
 
 Ctrl+Alt+Shift+L keeps the privacy screen in place until GNOME confirms that its native lock is active. Media paused by Stealth Lock stays paused until GNOME unlocks.
 
-Disabling Stealth Lock while it is active also requests native locking and leaves paused media paused. If that request fails, disabling still removes the privacy screen and exposes the desktop. After a Shell restart, Stealth Lock can restore the privacy screen if the extension loads again, but it cannot protect the interval before it loads.
+Disabling Stealth Lock while it is active also requests native locking and leaves paused media paused. If that request fails, disabling still removes the privacy screen and exposes the desktop. After a Shell restart, Stealth Lock can restore the privacy screen if the extension loads again, but it cannot protect the interval before it loads. Recovery is best effort: a crash before GNOME finishes saving the recovery snapshot can leave a previous or missing lock marker.
 
-Paused-media restoration also survives a Shell restart within the same login bus. Only the original player is eligible; a restarted player or externally changed playback is left alone.
+Paused-media restoration also survives a Shell restart within the same login bus. Only the original player is eligible; a restarted player or externally changed playback is left alone. The extension owns live lock state and playback intent in memory; GNOME's asynchronous runtime files store recovery snapshots.
 
 ## Update or remove
 
@@ -124,8 +124,8 @@ docs/                                   Visual program API and release guide
 tests/                                  Unit, authentication and isolated Shell tests
 ```
 
-- `extension.js` owns enablement and registered shortcuts. It supplies settings, the installation path and current shortcut actions to `LockSession`.
-- `shell/lockSession.js` owns protection, native lock transitions, cancellation and reverse cleanup. `shell/media.js` retains paused players separately until authenticated dismissal or native unlock; disable discards restoration.
+- `extension.js` owns enablement, registered shortcuts and the live runtime record across enable/disable. It supplies settings, the installation path, current shortcut actions and runtime ownership to `LockSession`.
+- `shell/lockSession.js` owns protection, native lock transitions, cancellation and reverse cleanup. `shell/media.js` coordinates paused-player ownership against the runtime record until authenticated dismissal or native unlock; disable discards restoration.
 - `shell/input.js` owns native password editing and reveal permissions. `shell/overlay.js` borrows its actor for presentation; `shell/effects/renderer.js` renders validated drawing commands, blur and clocks without access to credentials.
 - `shell/authentication.js` owns helper transport and retry timing; `helpers/authentication.py` owns the PAM transaction. `shell/screenshot.js` owns native capture and `shell/integration.js` isolates startup and screen-shield integration.
 - `shared/presets.js` owns saved-entry validation and one-time initialization; `shared/starter-programs.js` contains the starter source data. `shared/visual-process.js` owns isolated worker transport and `shared/visual-frame.js` validates drawing output. `prefs.js` owns the native settings UI and saved-entry editor. Central stylesheets own the theme.

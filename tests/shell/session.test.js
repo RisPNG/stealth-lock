@@ -227,7 +227,6 @@ export const tests = {
         const player = new TestPlayer('org.mpris.MediaPlayer2.stealth_test_external');
         try {
             for (const status of ['Playing', 'Stopped']) {
-                player.changeStatus('Playing');
                 extension.lock();
                 await waitFor(() => extension._session?._ready, 'External-status player paused');
                 equal(extension._session._media._players.size, 1, 'Own Paused signal retains ownership');
@@ -277,9 +276,11 @@ export const tests = {
         try {
             extension.lock();
             await waitFor(() => extension._session?._ready, 'Initial media intent persisted');
-            const record = global.get_runtime_state('(ssas)', PAUSED_MEDIA_STATE).deep_unpack();
+            const record = extension._runtime.intent;
             equal(record[2][0], player.connection.get_unique_name(), 'Persisted owner is the unique native bus owner');
-            recovered = new PausedMedia(cancellable);
+            await waitFor(() => global.get_runtime_state('(ssas)', PAUSED_MEDIA_STATE)?.deep_unpack()[1] === record[1],
+                'Initial native recovery snapshot completes');
+            recovered = new PausedMedia(cancellable, extension._runtime);
             await recovered.pause({pausePlaying: false});
             equal(player.pauseCount, 1, 'Rehydration does not pause an already paused player again');
             equal(recovered._players.size, 1, 'Matching bus and paused state rehydrate intent');
@@ -289,7 +290,9 @@ export const tests = {
             cancellable.cancel();
             await recovered.close();
             equal(player.playCount, 1, 'New scope restores matching owner');
-            assert(!global.get_runtime_state('(ssas)', PAUSED_MEDIA_STATE), 'Completed restoration removes persisted intent');
+            equal(extension._runtime.intent, null, 'Completed restoration releases live intent immediately');
+            await waitFor(() => !global.get_runtime_state('(ssas)', PAUSED_MEDIA_STATE),
+                'Completed restoration removes the asynchronous native recovery snapshot');
         } finally {
             extension._session?.close();
             cancellable.cancel();
@@ -335,6 +338,97 @@ export const tests = {
             await delay(50);
             player.destroy();
         }
+    },
+
+    async 'refused replacement acquisition preserves the preceding native MPRIS restoration'({extension, settings, expectLog}) {
+        settings.set_boolean('pause-media', true);
+        expectLog('Stealth Lock: test replacement acquisition failure');
+        expectLog('Stealth Lock could not protect the desktop: test replacement acquisition failure');
+        const player = new TestPlayer('org.mpris.MediaPlayer2.stealth_test_refused_relock');
+        const call = Gio.DBusConnection.prototype.call;
+        const add = Main.layoutManager.addTopChrome;
+        const lock = Main.screenShield?.lock;
+        const modals = Main.modalCount;
+        let delayed;
+        let intercept = false;
+        try {
+            Gio.DBusConnection.prototype.call = function (...arguments_) {
+                if (intercept && arguments_[0] === player.connection.get_unique_name() &&
+                    arguments_[2] === 'org.freedesktop.DBus.Properties' && arguments_[3] === 'Get') {
+                    intercept = false;
+                    const callback = arguments_[9];
+                    arguments_[9] = (connection, result) => { delayed = () => callback(connection, result); };
+                }
+                call.apply(this, arguments_);
+            };
+            extension.lock();
+            await waitFor(() => extension._session?._ready, 'Initial player paused');
+            const precedingMedia = extension._session._media;
+            const epoch = extension._runtime.intent[1];
+            intercept = true;
+            extension._session.close();
+            await waitFor(() => delayed, 'Preceding restoration response held');
+            Main.layoutManager.addTopChrome = function (overlay) {
+                add.call(this, overlay);
+                throw new Error('test replacement acquisition failure');
+            };
+            if (Main.screenShield)
+                Main.screenShield.lock = () => {};
+            extension.lock();
+            equal(extension._session, null, 'Refused replacement releases its scope');
+            equal(extension._runtime.current, precedingMedia, 'Preceding restoration retains ownership');
+            equal(extension._runtime.intent[1], epoch, 'Refused acquisition cannot claim a new epoch');
+            delayed();
+            delayed = null;
+            await waitFor(() => player.playCount === 1 && extension._runtime.intent === null &&
+                extension._runtime.current === null, 'Preceding restoration completes exactly once');
+            equal(Main.modalCount, modals, 'Refused replacement leaks no modal');
+        } finally {
+            delayed?.();
+            Gio.DBusConnection.prototype.call = call;
+            Main.layoutManager.addTopChrome = add;
+            if (Main.screenShield)
+                Main.screenShield.lock = lock;
+            extension._session?.close();
+            await delay(60);
+            player.destroy();
+        }
+    },
+
+    async 'native locking without a privacy session compensates old playback and restores after native unlock'({extension, settings}) {
+        if (!Main.screenShield)
+            return {skipped: 'Stock ScreenShield requires private fake GDM'};
+        settings.set_boolean('pause-media', true);
+        const player = new TestPlayer('org.mpris.MediaPlayer2.stealth_test_native_pending_play', 'Playing', false, true);
+        try {
+            extension.lock();
+            await waitFor(() => extension._session?._ready, 'Initial player paused');
+            extension._session.close();
+            await waitFor(() => player.pendingPlay, 'Prior restoration owns its delivered Play');
+            Main.screenShield.lock(false);
+            await waitFor(() => extension._runtime.locked && Main.screenShield.locked && Main.screenShield.active,
+                'No-session native locking immediately owns protection');
+            equal(extension._session, null, 'Native locking creates no privacy session');
+            player.finishPlay();
+            await waitFor(() => player.pauseCount === 2 && player.status === 'Paused' && extension._runtime.current === null,
+                'Native protection compensates the prior Play');
+            Main.screenShield.deactivate(true);
+            await waitFor(() => player.playCount === 2 && player.pendingPlay, 'Native unlock restores inherited media');
+            player.delayPlay = false;
+            player.finishPlay();
+            await waitFor(() => extension._runtime.intent === null && extension._runtime.current === null,
+                'Inherited restoration releases live ownership');
+            equal(player.status, 'Playing', 'Native unlock resumes the original player');
+            equal(extension._session, null, 'Clean native unlock adds no privacy session');
+        } finally {
+            player.delayPlay = false;
+            player.finishPlay();
+            Main.screenShield.deactivate(true);
+            extension._session?.close();
+            await delay(80);
+            player.destroy();
+        }
+        return undefined;
     },
 
     async 'an old Play completed after relocking is paused again and retains new restoration intent'({extension, settings}) {

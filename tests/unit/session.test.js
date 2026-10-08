@@ -6,12 +6,14 @@ import {Cancellable, deferred, loadModule} from './harness.js';
 
 async function runtime({capture, verification, handoff = false, grabbed = true, freeze = false, pause = false,
     overlayError = false, authenticationError = false, cursorMode = 'normal', cursorApi = 'visibility', cursorVisible = true,
-    cursorInhibitors = 0, nativeCursorInhibitor = false, mediaPause} = {}) {
+    cursorInhibitors = 0, nativeCursorInhibitor = false, mediaPause, deferPersistence = false} = {}) {
     const events = [];
     const signals = new Map();
     const chrome = new Set();
     const sources = new Map();
     const state = new Map();
+    const writes = new Map();
+    const runtimeState = {locked: false, restorePrivacy: false, intent: null, current: null, pendingPauses: new Map()};
     const shortcuts = {lock: 7, abort: 8};
     const native = {locked: handoff, onLock: null};
     const display = {action: 0, get_keybinding_action() { return this.action; },
@@ -153,7 +155,10 @@ async function runtime({capture, verification, handoff = false, grabbed = true, 
         }
     }
     class Media {
-        constructor(cancellable) { this.cancellable = cancellable; }
+        constructor(cancellable, owner) {
+            assert.equal(owner, runtimeState, 'session and media share one explicit runtime owner');
+            this.cancellable = cancellable;
+        }
         async pause({pausePlaying}) {
             if (!pausePlaying) return;
             events.push('media-pause');
@@ -164,6 +169,7 @@ async function runtime({capture, verification, handoff = false, grabbed = true, 
         close({resume}) {
             assert.equal(this.cancellable.is_cancelled(), true, 'session cancels owned work before releasing media');
             events.push(['media-close', resume]);
+            events.push(['media-lock-state', runtimeState.locked]);
             if (pause && resume)
                 events.push('media-resume');
         }
@@ -172,7 +178,16 @@ async function runtime({capture, verification, handoff = false, grabbed = true, 
         stage: {context: {get_backend: () => ({get_default_seat: () => seat})}},
         backend: {get_cursor_tracker: () => tracker},
         display,
-        set_runtime_state: (key, value) => value === null ? state.delete(key) : state.set(key, value.value),
+        get_runtime_state: () => assert.fail('session coordination must not read asynchronous persistence'),
+        set_runtime_state: (key, value) => {
+            const snapshot = value?.value ?? null;
+            if (deferPersistence)
+                writes.set(key, snapshot);
+            else if (snapshot === null)
+                state.delete(key);
+            else
+                state.set(key, snapshot);
+        },
     };
     const GLib = {
         PRIORITY_DEFAULT: 0, SOURCE_REMOVE: false, get_monotonic_time: () => 10000000,
@@ -210,8 +225,9 @@ async function runtime({capture, verification, handoff = false, grabbed = true, 
             return native.locked;
         }},
     }, {global, TextEncoder, console: {debug: message => events.push(message), error: message => events.push(message), warn: message => events.push(message)}});
-    const session = new module.LockSession({path: '/extension', settings, shortcuts, onClosed: () => events.push('closed')});
-    return {session, events, signals, sources, state, settings, values, Clutter, chrome, shortcuts, display, native, tracker, seat, key: (key, state = 0) => ({
+    const session = new module.LockSession({path: '/extension', settings, shortcuts, runtime: runtimeState, onClosed: () => events.push('closed')});
+    return {session, events, signals, sources, state, writes, runtimeState, settings, values, Clutter, chrome,
+        shortcuts, display, native, tracker, seat, key: (key, state = 0) => ({
         type: () => Clutter.EventType.KEY_PRESS, get_key_symbol: () => key, get_state: () => state,
         get_key_code: () => 1, get_key_unicode: () => key,
     })};
@@ -259,6 +275,32 @@ test('successful unlock clears the recovery marker and releases resources in rev
     assert.equal(chrome.size, 0);
     assert.equal(events.filter(event => event === 'chrome-remove').length, 1);
     assert.ok(events.indexOf('overlay-destroy') < events.indexOf('input-destroy'));
+});
+
+test('session lock and unlock update the live owner before asynchronous snapshots and media cleanup', async () => {
+    const state = await runtime({pause: true, deferPersistence: true});
+    await state.session.start();
+    assert.equal(state.runtimeState.locked, true);
+    assert.equal(state.state.has('stealth-lock@user.locked'), false, 'the lock snapshot is still pending');
+    state.state.set('stealth-lock@user.locked', true);
+    state.writes.clear();
+    state.session.close();
+    assert.equal(state.runtimeState.locked, false);
+    assert.equal(state.events.find(event => Array.isArray(event) && event[0] === 'media-lock-state')[1], false);
+    assert.equal(state.state.get('stealth-lock@user.locked'), true, 'the previous snapshot can outlive live unlock');
+    assert.equal(state.writes.get('stealth-lock@user.locked'), null);
+    assert.equal(state.chrome.size, 0);
+});
+
+test('disable preserves live protection while its native snapshot is still pending', async () => {
+    const state = await runtime({pause: true, deferPersistence: true});
+    await state.session.start();
+    state.session.disable();
+    assert.equal(state.runtimeState.locked, true);
+    assert.equal(state.state.has('stealth-lock@user.locked'), false);
+    assert.equal(state.writes.get('stealth-lock@user.locked'), true);
+    assert.equal(state.events.find(event => Array.isArray(event) && event[0] === 'media-lock-state')[1], true);
+    assert.equal(state.events.includes('media-resume'), false);
 });
 
 test('denied and unavailable authentication retain the modal with distinct feedback', async t => {
@@ -708,4 +750,25 @@ test('invalid authentication configuration requests the system lock instead of e
     assert.equal(state.chrome.size, 0);
     state.session.systemLockChanged(false);
     assert.ok(state.events.includes('closed'));
+});
+
+
+test('confirmed native locking protects the live owner after every failure before the privacy grab', async t => {
+    for (const failure of ['authentication', 'overlay', 'grab']) {
+        await t.test(failure, async () => {
+            const state = await runtime({handoff: true, deferPersistence: true, pause: true,
+                authenticationError: failure === 'authentication', overlayError: failure === 'overlay', grabbed: failure !== 'grab'});
+            await state.session.start();
+            assert.equal(state.session._grabbed, false);
+            assert.equal(state.session._nativeLock, true);
+            assert.equal(state.runtimeState.locked, true, 'confirmed native protection is authoritative before persistence');
+            assert.equal(state.state.has('stealth-lock@user.locked'), false);
+            assert.equal(state.writes.get('stealth-lock@user.locked'), true);
+            assert.equal(state.events.includes('media-pause'), false);
+            assert.equal(state.events.some(event => Array.isArray(event) && event[0] === 'media-close'), false);
+            state.session.systemLockChanged(false);
+            assert.equal(state.runtimeState.locked, false);
+            assert.ok(state.events.some(event => Array.isArray(event) && event[0] === 'media-close' && event[1] === true));
+        });
+    }
 });

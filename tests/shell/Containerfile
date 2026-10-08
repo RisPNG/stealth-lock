@@ -19,6 +19,8 @@ RUN if [ "$FEDORA_VERSION" -le 42 ]; then \
     dnf clean all && \
     useradd --create-home --uid 1000 --shell /bin/bash slh-ci && \
     chown root:root /etc/shadow /etc/gshadow && chmod 0600 /etc/shadow /etc/gshadow && \
+    mkdir -p /etc/systemd/system/user@.service.d && \
+    printf '[Service]\nEnvironment=XDG_RUNTIME_DIR=/run/user/%%i\n' > /etc/systemd/system/user@.service.d/50-ci-runtime.conf && \
     mkdir -p /var/lib/systemd/linger && touch /var/lib/systemd/linger/slh-ci && \
     systemctl set-default multi-user.target
 

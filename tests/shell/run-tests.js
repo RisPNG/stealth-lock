@@ -5,6 +5,7 @@ import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 import {assert, delay, setAuthControl, waitFor} from './support.js';
 
 export async function run() {
+    GLib.log_set_debug_enabled(true);
     const uuid = 'stealth-lock@user';
     const directory = Gio.File.new_for_uri(import.meta.url).get_parent();
     const children = directory.enumerate_children('standard::name', Gio.FileQueryInfoFlags.NONE, null);

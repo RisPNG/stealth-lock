@@ -1,3 +1,4 @@
+import Gio from 'gi://Gio';
 import Meta from 'gi://Meta';
 import Shell from 'gi://Shell';
 
@@ -5,7 +6,8 @@ import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 import {Extension} from 'resource:///org/gnome/shell/extensions/extension.js';
 
 import {LockSession} from './shell/lockSession.js';
-import {LOCKED_STATE} from './shared/runtime-state.js';
+import {PausedMedia} from './shell/media.js';
+import {LOCKED_STATE, PAUSED_MEDIA_STATE} from './shared/runtime-state.js';
 import {initializeEffectPresets} from './shared/presets.js';
 import {handoffToSystemLock, restoreWhenShellReady, watchSystemLock} from './shell/integration.js';
 
@@ -13,7 +15,17 @@ export default class StealthLockExtension extends Extension {
     enable() {
         this._cleanup = [];
         this._session = null;
-        this._mediaOwnership ??= {current: null};
+        if (!this._runtime) {
+            const restorePrivacy = global.get_runtime_state('b', LOCKED_STATE)?.deep_unpack() ?? false;
+            this._runtime = {
+                locked: restorePrivacy,
+                restorePrivacy,
+                intent: global.get_runtime_state('(ssas)', PAUSED_MEDIA_STATE)?.deep_unpack() ?? null,
+                current: null,
+                pendingPauses: new Map(),
+            };
+        }
+        this._runtime.locked = this._runtime.restorePrivacy || Main.sessionMode.isLocked;
         this._shortcuts = {lock: Meta.KeyBindingAction.NONE, abort: Meta.KeyBindingAction.NONE};
         this._settings = this.getSettings();
         try {
@@ -24,8 +36,15 @@ export default class StealthLockExtension extends Extension {
             this._cleanup.push(watchSystemLock(locked => {
                 if (this._session)
                     this._session.systemLockChanged(locked);
-                else if (!locked && !this._session)
-                    global.set_runtime_state(LOCKED_STATE, null);
+                else {
+                    this._runtime.locked = locked;
+                    if (!locked) {
+                        this._runtime.restorePrivacy = false;
+                        global.set_runtime_state(LOCKED_STATE, null);
+                    }
+                    if (!locked && this._runtime.intent)
+                        new PausedMedia(new Gio.Cancellable(), this._runtime).close();
+                }
             }));
             this._settings.connectObject(
                 'changed::debug-mode', () => this.configureAbortShortcut(),
@@ -41,11 +60,13 @@ export default class StealthLockExtension extends Extension {
                 this._shortcuts.abort = Meta.KeyBindingAction.NONE;
             });
             this.configureAbortShortcut();
-            if (global.get_runtime_state('b', LOCKED_STATE)?.deep_unpack()) {
+            if (this._runtime.restorePrivacy) {
                 this._cleanup.push(restoreWhenShellReady(() => {
-                    if (global.get_runtime_state('b', LOCKED_STATE)?.deep_unpack())
+                    if (this._runtime.restorePrivacy)
                         this.lock();
                 }, this));
+            } else if (!this._runtime.locked && this._runtime.intent) {
+                new PausedMedia(new Gio.Cancellable(), this._runtime).close();
             }
         } catch (error) {
             this.disable();
@@ -55,6 +76,10 @@ export default class StealthLockExtension extends Extension {
 
     disable() {
         this._session?.disable();
+        if (this._runtime.current)
+            this._runtime.current.close({resume: false});
+        else if (this._runtime.intent)
+            new PausedMedia(new Gio.Cancellable(), this._runtime).close({resume: false});
         for (const release of this._cleanup.splice(0).reverse()) {
             try {
                 release();
@@ -82,7 +107,7 @@ export default class StealthLockExtension extends Extension {
             settings: this._settings,
             path: this.path,
             shortcuts: this._shortcuts,
-            mediaOwnership: this._mediaOwnership,
+            runtime: this._runtime,
             onClosed: () => {
                 if (this._session === session)
                     this._session = null;

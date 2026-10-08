@@ -64,7 +64,7 @@ function replacer(_key, value) {
 
 export default class HarnessHelper extends Extension {
     enable() {
-        const seat = global.stage.get_context().get_backend().get_default_seat();
+        const seat = (global.stage.context?.get_backend() ?? Clutter.get_default_backend()).get_default_seat();
         this._keyboard = seat.create_virtual_device(Clutter.InputDeviceType.KEYBOARD_DEVICE);
         this._pointer = seat.create_virtual_device(Clutter.InputDeviceType.POINTER_DEVICE);
 
