@@ -1,10 +1,11 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import {setImmediate} from 'node:timers/promises';
 
 import {Cancellable, deferred, loadModule} from './harness.js';
 
 async function runtime({capture, verification, handoff = false, grabbed = true, freeze = false, pause = false,
-    overlayError = false, cursorMode = 'normal', cursorApi = 'visibility', cursorVisible = true,
+    overlayError = false, authenticationError = false, cursorMode = 'normal', cursorApi = 'visibility', cursorVisible = true,
     cursorInhibitors = 0, nativeCursorInhibitor = false, mediaPause} = {}) {
     const events = [];
     const signals = new Map();
@@ -13,17 +14,20 @@ async function runtime({capture, verification, handoff = false, grabbed = true, 
     const state = new Map();
     const shortcuts = {lock: 7, abort: 8};
     const native = {locked: handoff, onLock: null};
-    const display = {action: 0, get_keybinding_action() { return this.action; }};
+    const display = {action: 0, get_keybinding_action() { return this.action; },
+        get_sound_player: () => ({play_from_theme: name => events.push(['sound', name])})};
     let nextSource = 1;
     const values = {
         'lock-type': 'stealth', 'pause-media': pause, 'freeze-display': freeze,
+        'pam-service': 'gdm-password', 'retry-base-seconds': 1, 'retry-max-seconds': 30,
+        'password-reveal-timeout-seconds': 10, 'password-audible-feedback': false,
         'cursor-mode': cursorMode, 'auto-reset-seconds': 5, 'debug-mode': false,
         'normal-prompt-css': '', 'normal-background-css': '',
         'lock-hotkey': ['<Super>l'], 'debug-abort-hotkey': ['<Alt>l'],
     };
     const settings = {
         get_boolean: key => values[key], get_string: key => values[key], get_uint: key => values[key],
-        get_strv: key => values[key], connectObject: () => {}, disconnectObject: () => events.push('settings-disconnect'),
+        get_int: key => values[key], get_strv: key => values[key], connectObject: () => {}, disconnectObject: () => events.push('settings-disconnect'),
     };
     const emitter = {
         connectObject: (signal, callback) => signals.set(signal, callback),
@@ -119,6 +123,7 @@ async function runtime({capture, verification, handoff = false, grabbed = true, 
             this.background = {set_content: () => events.push('screenshot-adopt'), set_content_gravity: () => {}};
             this.prompt = {visible: false};
         }
+        relayout() { events.push('relayout'); }
         refreshStyle() {}
         refreshEffect() {}
         setStatus(message) { this.info.text = message; }
@@ -131,7 +136,14 @@ async function runtime({capture, verification, handoff = false, grabbed = true, 
         }
     }
     class Auth {
-        constructor() { this.busy = false; this.retryUntil = 0; }
+        constructor(path, cancellable, options) {
+            if (authenticationError)
+                throw new Error('Invalid PAM service');
+            assert.equal(path, '/extension');
+            assert.ok(cancellable instanceof Cancellable);
+            this.options = options;
+            this.busy = false; this.retryUntil = 0;
+        }
         async verify(password) {
             this.busy = true;
             events.push(['verify', password]);
@@ -142,7 +154,8 @@ async function runtime({capture, verification, handoff = false, grabbed = true, 
     }
     class Media {
         constructor(cancellable) { this.cancellable = cancellable; }
-        async pause() {
+        async pause({pausePlaying}) {
+            if (!pausePlaying) return;
             events.push('media-pause');
             if (mediaPause)
                 await mediaPause.promise;
@@ -182,10 +195,11 @@ async function runtime({capture, verification, handoff = false, grabbed = true, 
         './media.js': {PausedMedia: Media},
         './screenshot.js': {captureScreenshot: async cancellable => {
             events.push('capture');
-            const screenshot = capture ? await capture.promise : {content: {}};
+            const screenshot = capture ? await (typeof capture === 'function' ? capture(cancellable) : capture.promise) : {content: {}};
             cancellable.set_error_if_cancelled();
             return screenshot;
         }},
+        '../shared/runtime-state.js': {LOCKED_STATE: 'stealth-lock@user.locked'},
         './integration.js': {handoffToSystemLock: () => {
             events.push('native-lock-request');
             native.onLock?.();
@@ -195,7 +209,7 @@ async function runtime({capture, verification, handoff = false, grabbed = true, 
             }
             return native.locked;
         }},
-    }, {global, TextEncoder, console: {error: message => events.push(message), warn: message => events.push(message)}});
+    }, {global, TextEncoder, console: {debug: message => events.push(message), error: message => events.push(message), warn: message => events.push(message)}});
     const session = new module.LockSession({path: '/extension', settings, shortcuts, onClosed: () => events.push('closed')});
     return {session, events, signals, sources, state, settings, values, Clutter, chrome, shortcuts, display, native, tracker, seat, key: (key, state = 0) => ({
         type: () => Clutter.EventType.KEY_PRESS, get_key_symbol: () => key, get_state: () => state,
@@ -207,6 +221,7 @@ test('protects input before awaiting capture and rejects adoption after disable'
     const capture = deferred();
     const {session, events, state} = await runtime({freeze: true, capture});
     const startup = session.start();
+    await setImmediate();
     assert.ok(events.indexOf('grab') < events.indexOf('capture'));
     assert.equal(state.get('stealth-lock@user.locked'), true);
     session.close({clearState: false});
@@ -611,4 +626,86 @@ test('inactivity also discards native composition when no characters are committ
     session.handleEvent({type: () => Clutter.EventType.IM_PREEDIT, get_im_text: () => ''});
     assert.equal(session._passwordReset, 0);
     session.close();
+});
+
+
+test('monitor recapture retains protection, discards input and rejects obsolete frames', async () => {
+    const first = deferred();
+    const second = deferred();
+    const captures = [first, second];
+    const state = await runtime({capture: () => captures.shift().promise});
+    await state.session.start();
+    state.values['freeze-display'] = true;
+    state.session._input.actor.text = 'typed secret';
+    const oldUpdate = state.session.refreshMonitors();
+    assert.equal(state.session._ready, false);
+    assert.equal(state.session._input.actor.text, '');
+    assert.ok(state.chrome.has(state.session._overlay.actor));
+    assert.equal(state.session._overlay.actor.opacity, 0);
+    const newUpdate = state.session.refreshMonitors();
+    second.resolve({content: {latest: true}});
+    await newUpdate;
+    assert.equal(state.session._ready, true);
+    assert.equal(state.session._overlay.actor.opacity, 255);
+    first.resolve({content: {obsolete: true}});
+    await oldUpdate;
+    assert.equal(state.events.filter(event => event === 'screenshot-adopt').length, 1);
+    assert.equal(state.events.filter(event => event === 'relayout').length, 2);
+    state.session.close();
+});
+
+test('teardown during monitor recapture cannot adopt an image or recreate input', async () => {
+    const capture = deferred();
+    const state = await runtime({capture});
+    await state.session.start();
+    state.values['freeze-display'] = true;
+    const update = state.session.refreshMonitors();
+    state.session.close();
+    capture.resolve({content: {}});
+    await update;
+    assert.equal(state.session._closed, true);
+    assert.equal(state.chrome.size, 0);
+    assert.ok(!state.events.includes('screenshot-adopt'));
+});
+
+test('failed monitor recapture requests native locking while retaining the privacy modal', async () => {
+    const capture = deferred();
+    const state = await runtime({capture});
+    await state.session.start();
+    state.values['freeze-display'] = true;
+    const update = state.session.refreshMonitors();
+    capture.reject(new Error('recapture fixture failure'));
+    await update;
+    assert.ok(state.events.includes('native-lock-request'));
+    assert.equal(state.session._ready, true);
+    assert.equal(state.session._overlay.actor.opacity, 255);
+    assert.equal(state.session._closed, false);
+    state.session.close();
+});
+
+
+test('authentication policy is captured for the activation and audible feedback is opt-in', async () => {
+    const state = await runtime();
+    await state.session.start();
+    assert.deepEqual({...state.session._authentication.options}, {pamService: 'gdm-password', retryBaseSeconds: 1, retryMaxSeconds: 30});
+    state.values['pam-service'] = 'other-service';
+    assert.equal(state.session._authentication.options.pamService, 'gdm-password');
+    state.session._input.actor.text = 'attempt';
+    await state.session.authenticate();
+    assert.equal(state.events.filter(event => Array.isArray(event) && event[0] === 'sound').length, 0);
+    state.values['password-audible-feedback'] = true;
+    state.session._input.actor.text = 'attempt';
+    await state.session.authenticate();
+    assert.deepEqual(state.events.filter(event => Array.isArray(event) && event[0] === 'sound'), [['sound', 'dialog-error']]);
+    state.session.close();
+});
+
+test('invalid authentication configuration requests the system lock instead of escaping activation', async () => {
+    const state = await runtime({authenticationError: true, handoff: true});
+    await state.session.start();
+    assert.ok(state.events.includes('native-lock-request'));
+    assert.equal(state.session._nativeLock, true);
+    assert.equal(state.chrome.size, 0);
+    state.session.systemLockChanged(false);
+    assert.ok(state.events.includes('closed'));
 });

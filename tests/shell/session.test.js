@@ -28,12 +28,14 @@ const APPLICATION_INTERFACE = `
 </node>`;
 
 class TestPlayer {
-    constructor(name, status = 'Playing', delayPause = false) {
+    constructor(name, status = 'Playing', delayPause = false, delayPlay = false) {
         this.status = status;
         this.pauseCount = 0;
         this.playCount = 0;
         this.delayPause = delayPause;
         this.pendingPause = null;
+        this.delayPlay = delayPlay;
+        this.pendingPlay = null;
         this.CanPlay = true;
         this.CanPause = true;
         this.CanGoNext = false;
@@ -64,21 +66,48 @@ class TestPlayer {
 
     PauseAsync(_params, invocation) {
         this.pauseCount++;
-        this.status = 'Paused';
         if (this.delayPause)
             this.pendingPause = invocation;
-        else
+        else {
+            this.changeStatus('Paused');
             invocation.return_value(new GLib.Variant('()', []));
+        }
     }
 
-    Play() {
+    PlayAsync(_params, invocation) {
         this.playCount++;
-        this.status = 'Playing';
+        if (this.delayPlay) {
+            this.pendingPlay = invocation;
+        } else {
+            this.changeStatus('Playing');
+            invocation.return_value(new GLib.Variant('()', []));
+        }
+    }
+
+    changeStatus(status) {
+        this.status = status;
+        this.exported.emit_property_changed('PlaybackStatus', new GLib.Variant('s', status));
+    }
+
+    finishPlay() {
+        if (!this.pendingPlay)
+            return;
+        this.changeStatus('Playing');
+        this.pendingPlay.return_value(new GLib.Variant('()', []));
+        this.pendingPlay = null;
+    }
+
+    finishPause() {
+        if (!this.pendingPause)
+            return;
+        this.changeStatus('Paused');
+        this.pendingPause.return_value(new GLib.Variant('()', []));
+        this.pendingPause = null;
     }
 
     destroy() {
-        this.pendingPause?.return_value(new GLib.Variant('()', []));
-        this.pendingPause = null;
+        this.finishPlay();
+        this.finishPause();
         this.exported.unexport();
         this.application.unexport();
         this.connection.close_sync(null);
@@ -126,6 +155,7 @@ export const tests = {
             Shell.Screenshot.prototype.screenshot_stage_to_content_finish = () => [null, 1];
             extension.lock();
             const session = extension._session;
+            await waitFor(() => callback, 'Capture owns its asynchronous callback');
             assert(callback && session._grabbed && !session._ready, 'Grab precedes pending native capture');
             session.close();
             assert(session.cancellable.is_cancelled(), 'Close cancels pending capture');
@@ -172,8 +202,7 @@ export const tests = {
         }
     },
 
-    async 'a replacement MPRIS owner never receives restoration'({extension, settings, expectLog}) {
-        expectLog('Stealth Lock: media resume failed for :[0-9.]+:');
+    async 'a replacement MPRIS owner never receives restoration'({extension, settings}) {
         settings.set_boolean('pause-media', true);
         const name = 'org.mpris.MediaPlayer2.stealth_test_replacement';
         const original = new TestPlayer(name);
@@ -183,12 +212,153 @@ export const tests = {
             await waitFor(() => extension._session?._ready, 'Original player paused');
             original.destroy();
             replacement = new TestPlayer(name, 'Paused');
+            await waitFor(() => extension._session._media._players.size === 0, 'Disappearing owner invalidates restoration');
             extension._session.close();
             await delay(100);
             equal(replacement.playCount, 0, 'New unique owner untouched');
         } finally {
             extension._session?.close();
             replacement?.destroy();
+        }
+    },
+
+    async 'real external playback signals cancel restoration while the own Pause preserves it'({extension, settings}) {
+        settings.set_boolean('pause-media', true);
+        const player = new TestPlayer('org.mpris.MediaPlayer2.stealth_test_external');
+        try {
+            for (const status of ['Playing', 'Stopped']) {
+                player.changeStatus('Playing');
+                extension.lock();
+                await waitFor(() => extension._session?._ready, 'External-status player paused');
+                equal(extension._session._media._players.size, 1, 'Own Paused signal retains ownership');
+                player.changeStatus(status);
+                await waitFor(() => extension._session._media._players.size === 0, 'External status releases restoration');
+                extension._session.close();
+                await delay(60);
+                equal(player.playCount, 0, 'External playback decision retained');
+            }
+        } finally {
+            extension._session?.close();
+            await delay(50);
+            player.destroy();
+        }
+    },
+
+    async 'closing during a pending remote Pause waits for its effect before restoring playback'({extension, settings}) {
+        settings.set_boolean('pause-media', true);
+        const player = new TestPlayer('org.mpris.MediaPlayer2.stealth_test_pending_pause', 'Playing', true);
+        try {
+            extension.lock();
+            await waitFor(() => player.pendingPause, 'Remote Pause owns its pending reply');
+            const session = extension._session;
+            assert(session._grabbed && !session._ready, 'Privacy grab precedes pending media');
+            session.close();
+            await delay(60);
+            equal(player.playCount, 0, 'Restoration waits for the delivered Pause');
+            equal(player.status, 'Playing', 'Pending fixture has not paused yet');
+            player.finishPause();
+            await waitFor(() => player.playCount === 1 && player.status === 'Playing', 'Completed remote Pause is restored');
+            assert(!session._overlay && !extension._session, 'Late reply cannot recreate privacy resources');
+        } finally {
+            player.finishPause();
+            extension._session?.close();
+            await delay(80);
+            player.destroy();
+        }
+    },
+
+    async 'per-login paused-player records rehydrate a new scope without pausing new players'({extension, settings}) {
+        settings.set_boolean('pause-media', true);
+        const player = new TestPlayer('org.mpris.MediaPlayer2.stealth_test_rehydrate');
+        const {PausedMedia} = await import(Gio.File.new_for_path(extension.path).get_child('shell').get_child('media.js').get_uri());
+        const {PAUSED_MEDIA_STATE} = await import(Gio.File.new_for_path(extension.path).get_child('shared').get_child('runtime-state.js').get_uri());
+        const cancellable = new Gio.Cancellable();
+        let recovered;
+        try {
+            extension.lock();
+            await waitFor(() => extension._session?._ready, 'Initial media intent persisted');
+            const record = global.get_runtime_state('(ssas)', PAUSED_MEDIA_STATE).deep_unpack();
+            equal(record[2][0], player.connection.get_unique_name(), 'Persisted owner is the unique native bus owner');
+            recovered = new PausedMedia(cancellable);
+            await recovered.pause({pausePlaying: false});
+            equal(player.pauseCount, 1, 'Rehydration does not pause an already paused player again');
+            equal(recovered._players.size, 1, 'Matching bus and paused state rehydrate intent');
+            extension._session.close();
+            await delay(60);
+            equal(player.playCount, 0, 'Old epoch cannot restore after ownership is claimed');
+            cancellable.cancel();
+            await recovered.close();
+            equal(player.playCount, 1, 'New scope restores matching owner');
+            assert(!global.get_runtime_state('(ssas)', PAUSED_MEDIA_STATE), 'Completed restoration removes persisted intent');
+        } finally {
+            extension._session?.close();
+            cancellable.cancel();
+            await recovered?.close();
+            await delay(50);
+            player.destroy();
+        }
+    },
+
+    async 'immediate relock prevents an old native restoration query from playing or clearing new intent'({extension, settings}) {
+        settings.set_boolean('pause-media', true);
+        const player = new TestPlayer('org.mpris.MediaPlayer2.stealth_test_relock');
+        const call = Gio.DBusConnection.prototype.call;
+        let delayed;
+        let intercept = false;
+        try {
+            Gio.DBusConnection.prototype.call = function (...arguments_) {
+                if (intercept && arguments_[0] === player.connection.get_unique_name() &&
+                    arguments_[2] === 'org.freedesktop.DBus.Properties' && arguments_[3] === 'Get') {
+                    intercept = false;
+                    const callback = arguments_[9];
+                    arguments_[9] = (connection, result) => { delayed = () => callback(connection, result); };
+                }
+                call.apply(this, arguments_);
+            };
+            extension.lock();
+            await waitFor(() => extension._session?._ready, 'Initial player paused');
+            intercept = true;
+            extension._session.close();
+            await waitFor(() => delayed, 'Old restoration response held');
+            extension.lock();
+            await waitFor(() => extension._session?._ready, 'New session reclaims paused intent');
+            delayed();
+            delayed = null;
+            await delay(80);
+            equal(player.playCount, 0, 'Old query cannot play through a new lock');
+            extension._session.close();
+            await waitFor(() => player.playCount === 1, 'New unlock restores the player once');
+        } finally {
+            delayed?.();
+            Gio.DBusConnection.prototype.call = call;
+            extension._session?.close();
+            await delay(50);
+            player.destroy();
+        }
+    },
+
+    async 'an old Play completed after relocking is paused again and retains new restoration intent'({extension, settings}) {
+        settings.set_boolean('pause-media', true);
+        const player = new TestPlayer('org.mpris.MediaPlayer2.stealth_test_pending_play', 'Playing', false, true);
+        try {
+            extension.lock();
+            await waitFor(() => extension._session?._ready, 'Initial player paused');
+            extension._session.close();
+            await waitFor(() => player.pendingPlay, 'Old restoration owns a pending native Play');
+            extension.lock();
+            await waitFor(() => extension._session?._ready, 'New session reclaims pending intent');
+            player.finishPlay();
+            await waitFor(() => player.pauseCount === 2 && player.status === 'Paused', 'Late Play is compensated by a native Pause');
+            await waitFor(() => extension._session._media._players.size === 1, 'Compensated owner belongs to the new epoch');
+            player.delayPlay = false;
+            extension._session.close();
+            await waitFor(() => player.playCount === 2 && player.status === 'Playing', 'New unlock restores the compensated owner');
+        } finally {
+            player.delayPlay = false;
+            player.finishPlay();
+            extension._session?.close();
+            await delay(80);
+            player.destroy();
         }
     },
 

@@ -2,14 +2,17 @@ import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
 
 const AUTH_TIMEOUT_MS = 10000;
-const RETRY_BASE_MS = 1000;
-const RETRY_LIMIT_MS = 30000;
 export const MAX_PASSWORD_BYTES = 512;
 
 export class Authentication {
-    constructor(path, cancellable) {
+    constructor(path, cancellable, {pamService = 'gdm-password', retryBaseSeconds = 1, retryMaxSeconds = 30} = {}) {
+        if (typeof pamService !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/u.test(pamService))
+            throw new Error('PAM service must be an ASCII filename of 1 to 64 characters');
         this._helperPath = GLib.build_filenamev([path, 'helpers', 'authentication.py']);
         this._cancellable = cancellable;
+        this._pamService = pamService;
+        this._retryBaseMs = retryBaseSeconds * 1000;
+        this._retryLimitMs = retryMaxSeconds * 1000;
         this.busy = false;
         this._failures = 0;
         this.retryUntil = 0;
@@ -31,7 +34,7 @@ export class Authentication {
 
         try {
             process = Gio.Subprocess.new(
-                ['/usr/bin/python3', '-I', '-B', this._helperPath],
+                ['/usr/bin/python3', '-I', '-B', this._helperPath, this._pamService],
                 Gio.SubprocessFlags.STDIN_PIPE |
                 Gio.SubprocessFlags.STDOUT_SILENCE |
                 Gio.SubprocessFlags.STDERR_SILENCE
@@ -92,9 +95,10 @@ export class Authentication {
             this._failures = 0;
             this.retryUntil = 0;
         } else if (!this._cancellable.is_cancelled()) {
-            this._failures = Math.min(this._failures + 1, 6);
+            this._failures = Math.min(this._failures + 1,
+                Math.max(1, Math.ceil(Math.log2(this._retryLimitMs / this._retryBaseMs)) + 1));
             this.retryUntil = GLib.get_monotonic_time() / 1000 +
-                Math.min(RETRY_BASE_MS * 2 ** (this._failures - 1), RETRY_LIMIT_MS);
+                Math.min(this._retryBaseMs * 2 ** (this._failures - 1), this._retryLimitMs);
         }
 
         return outcome;

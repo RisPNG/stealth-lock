@@ -1,0 +1,27 @@
+ARG BASE_IMAGE
+FROM ${BASE_IMAGE}
+
+ARG FEDORA_VERSION
+RUN if [ "$FEDORA_VERSION" -le 41 ]; then \
+        mkdir -p /tmp/ci-repositories; \
+        printf '[fedora]\nname=Fedora archive\nbaseurl=https://archives.fedoraproject.org/pub/archive/fedora/linux/releases/%s/Everything/$basearch/os/\nenabled=1\ngpgcheck=1\ngpgkey=file:///etc/pki/rpm-gpg/RPM-GPG-KEY-fedora-%s-primary\n\n[updates]\nname=Fedora updates archive\nbaseurl=https://archives.fedoraproject.org/pub/archive/fedora/linux/updates/%s/Everything/$basearch/\nenabled=1\ngpgcheck=1\ngpgkey=file:///etc/pki/rpm-gpg/RPM-GPG-KEY-fedora-%s-primary\n' \
+            "$FEDORA_VERSION" "$FEDORA_VERSION" "$FEDORA_VERSION" "$FEDORA_VERSION" > /tmp/ci-repositories/fedora.repo; \
+        dnf -y --setopt=reposdir=/tmp/ci-repositories install \
+            gnome-shell gnome-extensions-app gjs gtk4 libadwaita gdm \
+            javascriptcoregtk6.0 python3 bubblewrap openssl gettext zip unzip \
+            dbus-daemon dbus-tools systemd shadow-utils util-linux procps-ng \
+            mesa-dri-drivers mesa-libEGL mesa-vulkan-drivers which; \
+    else \
+        dnf -y install \
+            gnome-shell gnome-extensions-app gjs gtk4 libadwaita gdm \
+            javascriptcoregtk6.0 python3 bubblewrap openssl gettext zip unzip \
+            dbus-daemon dbus-tools systemd shadow-utils util-linux procps-ng \
+            mesa-dri-drivers mesa-libEGL mesa-vulkan-drivers which; \
+    fi && \
+    dnf clean all && \
+    useradd --create-home --uid 1000 --shell /bin/bash slh-ci && \
+    mkdir -p /var/lib/systemd/linger && touch /var/lib/systemd/linger/slh-ci && \
+    systemctl set-default multi-user.target
+
+STOPSIGNAL SIGRTMIN+3
+CMD ["/sbin/init"]

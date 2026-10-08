@@ -12,6 +12,10 @@ async function runtime({bitmap = '', size = 40, olderShell = false, lockType = '
     const decodes = [];
     const events = [];
     const context = {};
+    const inputSources = {
+        currentSource: {displayName: 'English (US)'},
+        connectObject(_signal, callback, actor) { this.callback = callback; this.actor = actor; },
+    };
     const stage = {context: {get_backend: () => ({get_cogl_context: () => context})}};
     const cancellable = new Cancellable();
     const values = {
@@ -107,13 +111,17 @@ async function runtime({bitmap = '', size = 40, olderShell = false, lockType = '
         'gi://Pango': {default: {EllipsizeMode: {NONE: 0}}},
         'gi://St': {default: St},
         'resource:///org/gnome/shell/ui/main.js': {layoutManager: {monitors, primaryMonitor: monitors[0]}},
-        './effects/backdrop.js': {BackdropEffect: class { constructor() { assert.fail('disabled effects must not create a renderer'); } }},
+        'resource:///org/gnome/shell/ui/shellEntry.js': {CapsLockWarning: class extends Actor {
+            constructor() { super({capsWarning: true}); }
+        }},
+        'resource:///org/gnome/shell/ui/status/keyboard.js': {getInputSourceManager: () => inputSources},
+        './effects/renderer.js': {VisualEffect: class { constructor() { assert.fail('disabled effects must not create a renderer'); } }},
         '../shared/presets.js': Presets,
     }, {global: {stage, get_pointer: () => [200, 150]}, console: {debug: message => events.push(message)}});
     const input = {actor: new Actor()};
-    const overlay = new LockOverlay(settings, input.actor, cancellable);
+    const overlay = new LockOverlay(settings, input.actor, cancellable, '/installed-extension');
     overlay.actor.stage = stage;
-    return {overlay, input, cancellable, values, reads, decodes, uploads, stream, events, context};
+    return {overlay, input, cancellable, values, reads, decodes, uploads, stream, events, context, inputSources};
 }
 
 test('original bitmap pixels and hotspot survive both native image upload signatures', async t => {
@@ -135,6 +143,26 @@ test('prompt layout uses the native orientation API shared by GNOME45–51', asy
     assert.equal(overlay.prompt.orientation, 1);
     assert.equal(Object.hasOwn(overlay.prompt, 'vertical'), false);
     assert.equal(overlay.prompt.children[0], overlay.inputActor);
+    overlay.destroy();
+});
+
+test('normal prompts show native Caps Lock feedback and refresh the active keyboard layout', async () => {
+    const {overlay, inputSources} = await runtime();
+    assert.equal(overlay.prompt.children.some(actor => actor.capsWarning), true);
+    assert.equal(overlay.layoutLabel.text, 'English (US)');
+    assert.equal(inputSources.actor, overlay.actor);
+    inputSources.currentSource = {displayName: 'Arabic'};
+    inputSources.callback();
+    assert.equal(overlay.layoutLabel.text, 'Arabic');
+    assert.ok(Number.isFinite(overlay.prompt.x) && Number.isFinite(overlay.prompt.y));
+    overlay.destroy();
+});
+
+test('stealth mode does not show keyboard metadata or Caps Lock feedback over the visible desktop', async () => {
+    const {overlay, inputSources} = await runtime({lockType: 'stealth'});
+    assert.equal(overlay.prompt.children.some(actor => actor.capsWarning), false);
+    assert.equal(overlay.layoutLabel, undefined);
+    assert.equal(inputSources.callback, undefined);
     overlay.destroy();
 });
 

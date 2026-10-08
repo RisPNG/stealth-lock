@@ -4,14 +4,16 @@ import Shell from 'gi://Shell';
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 import {Extension} from 'resource:///org/gnome/shell/extensions/extension.js';
 
-import {LockSession, LOCKED_STATE} from './shell/lockSession.js';
+import {LockSession} from './shell/lockSession.js';
+import {LOCKED_STATE} from './shared/runtime-state.js';
 import {initializeEffectPresets} from './shared/presets.js';
-import {restoreWhenShellReady, watchSystemLock} from './shell/integration.js';
+import {handoffToSystemLock, restoreWhenShellReady, watchSystemLock} from './shell/integration.js';
 
 export default class StealthLockExtension extends Extension {
     enable() {
         this._cleanup = [];
         this._session = null;
+        this._mediaOwnership ??= {current: null};
         this._shortcuts = {lock: Meta.KeyBindingAction.NONE, abort: Meta.KeyBindingAction.NONE};
         this._settings = this.getSettings();
         try {
@@ -66,10 +68,21 @@ export default class StealthLockExtension extends Extension {
     lock() {
         if (this._session || Main.sessionMode.currentMode !== 'user' || Main.sessionMode.isLocked)
             return;
+        if (this._settings.get_string('authentication-mode') === 'system') {
+            try {
+                if (handoffToSystemLock())
+                    return;
+            } catch (error) {
+                console.error(`Stealth Lock: system authentication failed: ${error.message}`);
+            }
+            Main.notifyError('Stealth Lock could not activate system authentication', 'The system lock screen is unavailable');
+            return;
+        }
         const session = new LockSession({
             settings: this._settings,
             path: this.path,
             shortcuts: this._shortcuts,
+            mediaOwnership: this._mediaOwnership,
             onClosed: () => {
                 if (this._session === session)
                     this._session = null;

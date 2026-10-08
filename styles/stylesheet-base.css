@@ -40,12 +40,9 @@
     font-size: 12px;
 }
 
-.stealth-lock-effect-blur {
+.stealth-lock-effect {
     background-color: transparent;
-}
-
-.stealth-lock-effect-neo-rain,
-.stealth-lock-effect-city-grow {
+    -stealth-lock-blur: rgba(0, 0, 0, 0.25);
     -stealth-lock-background: #000000;
     -stealth-lock-foreground: #00ff46;
     -stealth-lock-head: #b3ffb3;

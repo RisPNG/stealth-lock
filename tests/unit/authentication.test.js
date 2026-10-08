@@ -4,7 +4,7 @@ import test from 'node:test';
 
 import {loadModule} from './harness.js';
 
-async function createAuthenticationFixture(t, {spawnError = null, finishOnKill = true, cancelOnConnect = false} = {}) {
+async function createAuthenticationFixture(t, {spawnError = null, finishOnKill = true, cancelOnConnect = false, options = {}} = {}) {
     let now = 100000;
     let nextId = 1;
     const timers = new Map();
@@ -111,7 +111,7 @@ async function createAuthenticationFixture(t, {spawnError = null, finishOnKill =
     }, {TextEncoder, console: {warn: message => warnings.push(message)}});
 
     return {
-        authentication: new Authentication('/extension/path', cancellable),
+        authentication: new Authentication('/extension/path', cancellable, options),
         cancellable,
         processes,
         warnings,
@@ -139,7 +139,7 @@ test('successful helper uses the pinned interpreter and private stdin, then rele
     const attempt = authentication.verify(password);
     assert.equal(authentication.busy, true);
     assert.equal(processes.length, 1);
-    assert.deepEqual(processes[0].argv, ['/usr/bin/python3', '-I', '-B', '/extension/path/helpers/authentication.py']);
+    assert.deepEqual(processes[0].argv, ['/usr/bin/python3', '-I', '-B', '/extension/path/helpers/authentication.py', 'gdm-password']);
     assert.equal(processes[0].flags, 7);
     assert.equal(processes[0].password, password);
     assert.equal(processes[0].token, cancellable);
@@ -310,4 +310,48 @@ test('malformed or empty passwords never start a helper or consume a retry attem
     assert.equal(processes.length, 0);
     assert.equal(authentication.retryUntil, 0);
     assert.equal(authentication.busy, false);
+});
+
+test('explicit PAM service is snapshotted and passed as the only helper argument', async t => {
+    const options = {pamService: 'custom-password', retryBaseSeconds: 3, retryMaxSeconds: 20};
+    const {authentication, processes, now} = await createAuthenticationFixture(t, {options});
+    options.pamService = 'other';
+    options.retryBaseSeconds = 1;
+    const attempt = authentication.verify('wrong');
+    assert.equal(processes[0].argv.at(-1), 'custom-password');
+    assert.equal(processes[0].argv.length, 5);
+    processes[0].finish(1);
+    assert.equal(await attempt, 'denied');
+    assert.equal(authentication.retryUntil, now() + 3000);
+});
+
+test('invalid PAM service names cannot start the transport', async t => {
+    for (const pamService of ['', '../login', '/etc/pam.d/login', '.', '-login', '日本語', 'x'.repeat(65), null])
+        await assert.rejects(createAuthenticationFixture(t, {options: {pamService}}), /PAM service/);
+});
+
+test('configured retries reach the maximum even when it exceeds the original thirty-second limit', async t => {
+    const {authentication, processes, now, advance} = await createAuthenticationFixture(t, {
+        options: {retryBaseSeconds: 1, retryMaxSeconds: 300},
+    });
+    for (const delay of [1000, 2000, 4000, 8000, 16000, 32000, 64000, 128000, 256000, 300000, 300000]) {
+        const attempt = authentication.verify('wrong');
+        processes.at(-1).finish(1);
+        assert.equal(await attempt, 'denied');
+        assert.equal(authentication.retryUntil, now() + delay);
+        advance(delay);
+    }
+});
+
+test('configured maximum remains authoritative when it is below the base delay', async t => {
+    const {authentication, processes, now, advance} = await createAuthenticationFixture(t, {
+        options: {retryBaseSeconds: 30, retryMaxSeconds: 1},
+    });
+    for (let failure = 0; failure < 3; failure++) {
+        const attempt = authentication.verify('wrong');
+        processes.at(-1).finish(1);
+        assert.equal(await attempt, 'denied');
+        assert.equal(authentication.retryUntil, now() + 1000);
+        advance(1000);
+    }
 });

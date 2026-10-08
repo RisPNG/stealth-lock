@@ -75,6 +75,21 @@ try {
             }
         },
 
+        async 'configured administrator service reaches the native helper as an explicit argument'() {
+            const authentication = new Authentication(directory.get_path(), new Gio.Cancellable(), {pamService: 'custom-password'});
+            equal(await authentication.verify('correct'), 'granted');
+        },
+
+        async 'configured retry bounds control native admission without changing the helper deadline'() {
+            const authentication = new Authentication(directory.get_path(), new Gio.Cancellable(), {
+                retryBaseSeconds: 2, retryMaxSeconds: 3,
+            });
+            equal(await authentication.verify('wrong'), 'denied');
+            const remaining = authentication.retryUntil - GLib.get_monotonic_time() / 1000;
+            assert(remaining > 1900 && remaining <= 2000, 'Configured first retry deadline was not two seconds');
+            equal(await authentication.verify('correct'), 'error');
+        },
+
         async 'missing fixed helper fails closed'() {
             const authentication = new Authentication(directory.get_child('missing').get_path(), new Gio.Cancellable());
             equal(await authentication.verify('correct'), 'error');

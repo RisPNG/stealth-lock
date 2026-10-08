@@ -5,7 +5,8 @@ import GLib from 'gi://GLib';
 import Gtk from 'gi://Gtk';
 
 import {ExtensionPreferences, gettext as _} from 'resource:///org/gnome/Shell/Extensions/js/extensions/prefs.js';
-import {initializeEffectPresets, readSavedEntries, validateEffectConfig} from './shared/presets.js';
+import {initializeEffectPresets, readSavedEntries, validateVisualProgramSource} from './shared/presets.js';
+import {VisualProcess} from './shared/visual-process.js';
 
 export default class StealthLockPreferences extends ExtensionPreferences {
     fillPreferencesWindow(window) {
@@ -68,6 +69,7 @@ export default class StealthLockPreferences extends ExtensionPreferences {
 
         const comboRows = new Map();
         for (const [key, group, title, subtitle, labels] of [
+            ['authentication-mode', features, _('Authentication'), _('Password keeps the desktop visible; System uses native sign-in methods'), [_('Password Privacy Screen'), _('System Lock Screen')]],
             ['cursor-mode', features, _('Cursor'), _('Choose how the pointer appears while active'), [_('Lock Icon'), _('Normal Cursor'), _('No Cursor')]],
             ['lock-type', password, _('Lock Type'), _('Stealth hides the prompt; Normal shows a password entry'), [_('Stealth'), _('Normal')]],
             ['normal-prompt-cursor-anchor', password, _('Cursor Anchor'), _('Place the prompt at this corner of the pointer'), [_('Bottom Right'), _('Top Right'), _('Top Left'), _('Bottom Left')]],
@@ -77,6 +79,23 @@ export default class StealthLockPreferences extends ExtensionPreferences {
             comboRows.set(key, {row});
             group.add(row);
         }
+        const pamService = new Adw.EntryRow({title: _('Password PAM Service'),
+            tooltip_text: _('Administrator-configured filename in /etc/pam.d. Changing this requires validating that service on your distribution.')});
+        settings.bind('pam-service', pamService, 'text', Gio.SettingsBindFlags.DEFAULT);
+        password.add(pamService);
+        for (const [key, title, subtitle] of [
+            ['retry-base-seconds', _('Initial Retry Delay'), _('Seconds after the first rejected password')],
+            ['retry-max-seconds', _('Maximum Retry Delay'), _('Maximum seconds between attempts')],
+            ['password-reveal-timeout-seconds', _('Reveal Timeout'), _('Hide a revealed password after this many seconds; 0 disables the timer')],
+        ]) {
+            const [, [lower, upper]] = settings.settings_schema.get_key(key).get_range().recursiveUnpack();
+            const row = new Adw.SpinRow({title, subtitle, adjustment: new Gtk.Adjustment({lower, upper, step_increment: 1, page_increment: 10})});
+            settings.bind(key, row, 'value', Gio.SettingsBindFlags.DEFAULT);
+            password.add(row);
+        }
+        const audible = new Adw.SwitchRow({title: _('Audible Authentication Feedback'), subtitle: _('Play the system alert sound after a failed attempt')});
+        settings.bind('password-audible-feedback', audible, 'active', Gio.SettingsBindFlags.DEFAULT);
+        password.add(audible);
         const follow = new Adw.SwitchRow({title: _('Follow Cursor'), subtitle: _('Position the normal prompt relative to the pointer')});
         settings.bind('normal-prompt-follow-cursor', follow, 'active', Gio.SettingsBindFlags.DEFAULT);
         password.add(follow);
@@ -100,7 +119,7 @@ export default class StealthLockPreferences extends ExtensionPreferences {
         for (let index = 0; index < monitors.get_n_items(); index++) {
             const monitor = monitors.get_item(index);
             const label = [String(index), monitor.get_connector(), monitor.get_model()].filter(Boolean).join(': ');
-            monitorValues.push(String(index));
+            monitorValues.push(monitor.get_connector() || String(index));
             monitorLabels.push(label);
         }
         const selectedMonitor = settings.get_string('normal-prompt-monitor');
@@ -190,21 +209,21 @@ export default class StealthLockPreferences extends ExtensionPreferences {
         const effectNames = Gtk.StringList.new([_('None'), ...effectEntries.map(entry => entry.name)]);
         const effectRow = new Adw.ComboRow({
             title: _('Visual Effect'),
-            subtitle: _('Choose a saved effect configuration; None turns effects off'),
+            subtitle: _('Choose a saved JavaScript program; None turns effects off'),
             model: effectNames,
             selected: Math.max(0, effectEntries.findIndex(entry => entry.name === settings.get_string('visual-effect-active')) + 1),
         });
         const editEffects = new Gtk.Button({icon_name: 'document-edit-symbolic', valign: Gtk.Align.CENTER, css_classes: ['flat'], tooltip_text: _('Edit effect presets')});
         effectRow.add_suffix(editEffects);
         styles.add(effectRow);
-        editEffects.connect('clicked', () => this._showSavedEntryEditor(window, settings, 'visual-effect-active', _('Visual Effect Presets'), _('Edit saved configurations for blur, neo-rain, and city-grow')));
+        editEffects.connect('clicked', () => this._showSavedEntryEditor(window, settings, 'visual-effect-active', _('Visual Effect Programs'), _('Edit ordinary saved JavaScript programs')));
         const effectSelectionId = effectRow.connect('notify::selected', () => {
             const entry = effectEntries[effectRow.selected - 1];
             if (entry) {
                 try {
-                    validateEffectConfig(entry.code);
+                    validateVisualProgramSource(entry.code);
                 } catch (error) {
-                    window.add_toast(new Adw.Toast({title: _('Invalid effect configuration: %s').format(error.message)}));
+                    window.add_toast(new Adw.Toast({title: _('Invalid visual program: %s').format(error.message)}));
                     effectRow.block_signal_handler(effectSelectionId);
                     effectRow.selected = Math.max(0, effectEntries.findIndex(preset => preset.name === settings.get_string('visual-effect-active')) + 1);
                     effectRow.unblock_signal_handler(effectSelectionId);
@@ -260,10 +279,16 @@ export default class StealthLockPreferences extends ExtensionPreferences {
                 effectRow.unblock_signal_handler(effectSelectionId);
             }
             const combo = comboRows.get(key);
-            if (combo)
+            if (combo) {
+                if (key === 'normal-prompt-monitor' && !monitorValues.includes(settings.get_string(key))) {
+                    const connector = settings.get_string(key);
+                    monitorValues.push(connector);
+                    monitorRow.model.append(_('Monitor %s (disconnected)').format(connector));
+                }
                 combo.row.selected = combo.values
                     ? Math.max(0, combo.values.indexOf(settings.get_string(key)))
                     : settings.get_enum(key);
+            }
             const color = colorButtons.get(key);
             if (color) {
                 const bytes = settings.get_value(key).deep_unpack();
@@ -378,7 +403,7 @@ export default class StealthLockPreferences extends ExtensionPreferences {
         content.set_spacing(12);
         content.append(new Gtk.Label({
             label: description + '. ' + (isEffect
-                ? _('Use JSON with an effect name and typed knobs. Unspecified knobs use defaults. JavaScript is never executed. Apply saves the configuration and selects that preset.')
+                ? _('Write JavaScript using ctx.draw, ctx.blur and ctx.clock. ctx.event is init, update or destroy; ctx.state persists for one activation. Programs run in isolation and cannot access password input or lock controls. Apply saves and selects the program.')
                 : _('Use CSS declarations only. Leave blank to use the default style.')),
             wrap: true,
             xalign: 0,
@@ -422,12 +447,50 @@ export default class StealthLockPreferences extends ExtensionPreferences {
         content.append(scroll);
         const validation = new Gtk.Label({wrap: true, xalign: 0, css_classes: ['error'], visible: false});
         content.append(validation);
+        let checker = null;
+        if (isEffect) {
+            const check = new Gtk.Button({label: _('Check JavaScript'), halign: Gtk.Align.START});
+            content.append(check);
+            check.connect('clicked', async () => {
+                checker?.destroy();
+                check.sensitive = false;
+                apply.sensitive = false;
+                content.sensitive = false;
+                try {
+                    const code = buffer.get_text(buffer.get_start_iter(), buffer.get_end_iter(), false);
+                    validateVisualProgramSource(code);
+                    checker = new VisualProcess(this.path, this._cancellable);
+                    const result = await checker.request({event: 'check', code});
+                    if (!this._dialogs.has(dialog))
+                        return;
+                    if (!result.valid)
+                        throw new Error(_('The program could not be checked'));
+                    validation.label = _('JavaScript syntax is valid');
+                    validation.remove_css_class('error');
+                } catch (error) {
+                    if (this._dialogs.has(dialog)) {
+                        validation.label = error.message;
+                        validation.add_css_class('error');
+                    }
+                } finally {
+                    checker?.destroy();
+                    checker = null;
+                    if (this._dialogs.has(dialog)) {
+                        validation.visible = true;
+                        check.sensitive = true;
+                        content.sensitive = true;
+                        apply.sensitive = savedEntriesValid && configurationValid &&
+                            (!!entries[selector.selected] || name.text.trim() !== '');
+                    }
+                }
+            });
+        }
         let configurationValid = true;
 
         buffer.connect('changed', () => {
             if (isEffect) {
                 try {
-                    validateEffectConfig(buffer.get_text(buffer.get_start_iter(), buffer.get_end_iter(), false));
+                    validateVisualProgramSource(buffer.get_text(buffer.get_start_iter(), buffer.get_end_iter(), false));
                     configurationValid = true;
                     validation.visible = false;
                 } catch (error) {
@@ -509,11 +572,36 @@ export default class StealthLockPreferences extends ExtensionPreferences {
             selector.selected = entries.length ? 0 : Gtk.INVALID_LIST_POSITION;
             name.text = entries[0]?.name ?? '';
         });
-        dialog.connect('response', (_dialog, response) => {
+        dialog.connect('response', async (_dialog, response) => {
             if (response === Gtk.ResponseType.OK) {
                 const code = buffer.get_text(buffer.get_start_iter(), buffer.get_end_iter(), false);
                 if (isEffect) {
                     if (!apply.sensitive)
+                        return;
+                    apply.sensitive = false;
+                    content.sensitive = false;
+                    try {
+                        checker?.destroy();
+                        checker = new VisualProcess(this.path, this._cancellable);
+                        const result = await checker.request({event: 'check', code});
+                        if (!result.valid)
+                            throw new Error(_('The program could not be checked'));
+                    } catch (error) {
+                        if (this._dialogs.has(dialog)) {
+                            validation.label = error.message;
+                            validation.add_css_class('error');
+                            validation.visible = true;
+                        }
+                        return;
+                    } finally {
+                        checker?.destroy();
+                        checker = null;
+                        if (this._dialogs.has(dialog)) {
+                            apply.sensitive = true;
+                            content.sensitive = true;
+                        }
+                    }
+                    if (!this._dialogs.has(dialog))
                         return;
                     let entry = entries[selector.selected];
                     if (entry) {
@@ -529,9 +617,10 @@ export default class StealthLockPreferences extends ExtensionPreferences {
                 }
             }
             this._dialogs.delete(dialog);
+            checker?.destroy();
             dialog.destroy();
         });
-        buffer.set_text(isEffect ? initialEntry?.code ?? JSON.stringify({effect: 'neo-rain', knobs: {}}, null, 2) : settings.get_string(key), -1);
+        buffer.set_text(isEffect ? initialEntry?.code ?? 'if (ctx.event === "destroy") return;\nctx.draw.setSourceRGBA(...ctx.colors.foreground);\nctx.draw.rectangle(20, 20, 120, 80);\nctx.draw.fill();' : settings.get_string(key), -1);
         dialog.present();
     }
 }

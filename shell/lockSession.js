@@ -12,16 +12,16 @@ import {LockOverlay} from './overlay.js';
 import {PausedMedia} from './media.js';
 import {captureScreenshot} from './screenshot.js';
 import {handoffToSystemLock} from './integration.js';
-
-export const LOCKED_STATE = 'stealth-lock@user.locked';
+import {LOCKED_STATE} from '../shared/runtime-state.js';
 
 export class LockSession {
-    constructor({settings, path, shortcuts, onClosed}) {
+    constructor({settings, path, shortcuts, mediaOwnership, onClosed}) {
         this.cancellable = new Gio.Cancellable();
         this._settings = settings;
+        this._path = path;
         this._shortcuts = shortcuts;
-        this._authentication = new Authentication(path, this.cancellable);
-        this._media = new PausedMedia(this.cancellable);
+        this._authentication = null;
+        this._media = new PausedMedia(this.cancellable, mediaOwnership);
         this._onClosed = onClosed;
         this._cleanup = [];
         this._closed = false;
@@ -34,19 +34,26 @@ export class LockSession {
         this._grabbed = false;
         this._input = null;
         this._overlay = null;
+        this._layoutGeneration = 0;
     }
 
     async start() {
         try {
             this.cancellable.set_error_if_cancelled();
+            this._authentication = new Authentication(this._path, this.cancellable, {
+                pamService: this._settings.get_string('pam-service'),
+                retryBaseSeconds: this._settings.get_int('retry-base-seconds'),
+                retryMaxSeconds: this._settings.get_int('retry-max-seconds'),
+            });
             this._input = new PasswordInput({
                 stealth: this._settings.get_string('lock-type') === 'stealth',
+                revealTimeoutSeconds: this._settings.get_int('password-reveal-timeout-seconds'),
                 onSubmit: () => this.authenticate(),
                 onActivity: () => this.resetPasswordTimeout(),
             });
             const input = this._input;
             this._cleanup.push(() => input.destroy());
-            this._overlay = new LockOverlay(this._settings, input.actor, this.cancellable);
+            this._overlay = new LockOverlay(this._settings, input.actor, this.cancellable, this._path);
             const overlay = this._overlay;
             this._cleanup.push(() => overlay.destroy());
             overlay.actor.opacity = 0;
@@ -61,7 +68,7 @@ export class LockSession {
 
             overlay.actor.connectObject('captured-event', (_actor, event) => this.handleEvent(event), overlay.actor);
             this._cleanup.push(() => overlay.actor.disconnectObject(overlay.actor));
-            Main.layoutManager.connectObject('monitors-changed', () => this.handoff(), overlay.actor);
+            Main.layoutManager.connectObject('monitors-changed', () => this.refreshMonitors(), overlay.actor);
             this._cleanup.push(() => Main.layoutManager.disconnectObject(overlay.actor));
             this._settings.connectObject(
                 'changed::normal-prompt-css', () => overlay.refreshStyle(),
@@ -75,9 +82,13 @@ export class LockSession {
                         overlay.refreshEffect();
                 },
                 'changed::normal-prompt-monitor', () => {
+                    overlay.positionPrompt();
                     if (this._ready)
                         overlay.refreshEffect();
                 },
+                ...['normal-prompt-follow-cursor', 'normal-prompt-cursor-anchor', 'normal-prompt-offset-x',
+                    'normal-prompt-offset-y', 'normal-prompt-fixed-x', 'normal-prompt-fixed-y'].flatMap(key =>
+                    ['changed::' + key, () => overlay.positionPrompt()]),
                 overlay.actor
             );
             this._cleanup.push(() => this._settings.disconnectObject(overlay.actor));
@@ -88,15 +99,16 @@ export class LockSession {
                 }
             });
 
-            if (this._settings.get_boolean('pause-media')) {
-                await this._media.pause();
-                this.cancellable.set_error_if_cancelled();
-            }
+            await this._media.pause({pausePlaying: this._settings.get_boolean('pause-media')});
+            this.cancellable.set_error_if_cancelled();
             if (this._settings.get_boolean('freeze-display')) {
+                const generation = this._layoutGeneration;
                 const {content} = await captureScreenshot(this.cancellable);
                 this.cancellable.set_error_if_cancelled();
-                overlay.background.set_content(content);
-                overlay.background.set_content_gravity(Clutter.ContentGravity.RESIZE_FILL);
+                if (generation === this._layoutGeneration) {
+                    overlay.background.set_content(content);
+                    overlay.background.set_content_gravity(Clutter.ContentGravity.RESIZE_FILL);
+                }
             }
             if (this._settings.get_string('cursor-mode') !== 'normal') {
                 const tracker = Meta.CursorTracker.get_for_display
@@ -122,9 +134,11 @@ export class LockSession {
                     });
                 }
             }
-            overlay.refreshEffect();
-            this._ready = true;
-            overlay.actor.opacity = 255;
+            if (this._layoutGeneration === 0) {
+                overlay.refreshEffect();
+                this._ready = true;
+                overlay.actor.opacity = 255;
+            }
             overlay.info.text = 'Stealth Lock privacy screen\nPassword required\nCtrl+Alt+Shift+L: GNOME lock';
             input.actor.grab_key_focus();
         } catch (error) {
@@ -141,6 +155,40 @@ export class LockSession {
                     this.close({clearState: false});
                     Main.notifyError('Stealth Lock could not protect the desktop', error.message);
                 }
+            }
+        }
+    }
+
+    async refreshMonitors() {
+        if (this._closed || this._nativeLock)
+            return;
+        const generation = ++this._layoutGeneration;
+        const overlay = this._overlay;
+        this._ready = false;
+        this._input.discardPassword();
+        try {
+            overlay.relayout();
+            if (this._settings.get_boolean('freeze-display')) {
+                overlay.actor.opacity = 0;
+                const {content} = await captureScreenshot(this.cancellable);
+                this.cancellable.set_error_if_cancelled();
+                if (generation !== this._layoutGeneration)
+                    return;
+                overlay.background.set_content(content);
+                overlay.background.set_content_gravity(Clutter.ContentGravity.RESIZE_FILL);
+            }
+            if (generation !== this._layoutGeneration)
+                return;
+            overlay.actor.opacity = 255;
+            this._ready = true;
+            this._input.actor.grab_key_focus();
+        } catch (error) {
+            if (!this.cancellable.is_cancelled() && generation === this._layoutGeneration) {
+                overlay.actor.opacity = 255;
+                this._ready = true;
+                this._overlay.setStatus('Monitor update failed; use GNOME lock');
+                this.handoff();
+                console.debug(`Stealth Lock: monitor update failed: ${error.message}`);
             }
         }
     }
@@ -239,6 +287,8 @@ export class LockSession {
                 this._overlay.setStatus('Password not accepted; wait before retrying');
             else
                 this._overlay.setStatus('Authentication unavailable; Ctrl+Alt+Shift+L opens GNOME lock');
+            if (outcome !== 'granted' && this._settings.get_boolean('password-audible-feedback'))
+                global.display.get_sound_player().play_from_theme('dialog-error', 'Stealth Lock authentication failed', null);
         } catch (error) {
             if (!this.cancellable.is_cancelled()) {
                 console.error(`Stealth Lock: authentication failed: ${error.message}`);

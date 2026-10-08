@@ -2,7 +2,10 @@
 
 import ctypes
 import os
+import pathlib
 import pwd
+import re
+import stat
 import sys
 
 
@@ -40,7 +43,9 @@ class PamConv(ctypes.Structure):
     _fields_ = [("conv", PamConversation), ("appdata_ptr", ctypes.c_void_p)]
 
 
-def verify_password(password):
+def verify_password(password, service):
+    if not isinstance(service, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}", service):
+        return "error"
     if not isinstance(password, str) or not password or any(
         character in password for character in ("\n", "\r", "\0")
     ):
@@ -63,6 +68,14 @@ def verify_password(password):
     password_prompts = 0
 
     try:
+        service_path = pathlib.Path("/etc/pam.d") / service
+        resolved_path = service_path.resolve(strict=True)
+        for path in {*service_path.parents, service_path, *resolved_path.parents, resolved_path}:
+            metadata = path.lstat()
+            if metadata.st_uid != 0 or (not stat.S_ISLNK(metadata.st_mode) and metadata.st_mode & 0o022):
+                raise ValueError("PAM service path is not administrator-owned")
+        if not stat.S_ISREG(resolved_path.lstat().st_mode):
+            raise ValueError("PAM service must be a regular file")
         username = pwd.getpwuid(os.getuid()).pw_name.encode("utf-8")
         libpam = ctypes.CDLL("libpam.so.0")
         libc = ctypes.CDLL(None)
@@ -139,7 +152,7 @@ def verify_password(password):
         libpam.pam_end.argtypes = [ctypes.c_void_p, ctypes.c_int]
         libpam.pam_end.restype = ctypes.c_int
 
-        status = libpam.pam_start(b"gdm-password", username, ctypes.byref(conv), ctypes.byref(handle))
+        status = libpam.pam_start(service.encode("ascii"), username, ctypes.byref(conv), ctypes.byref(handle))
         if status == PAM_SUCCESS and handle:
             started = True
             status = libpam.pam_authenticate(handle, PAM_DISALLOW_NULL_AUTHTOK)
@@ -166,11 +179,13 @@ def verify_password(password):
 
 if __name__ == "__main__":
     try:
+        if len(sys.argv) != 2:
+            sys.exit(2)
         payload = sys.stdin.buffer.read(PAM_MAX_RESP_SIZE + 1)
         if len(payload) > PAM_MAX_RESP_SIZE:
             sys.exit(2)
         password = payload.decode("utf-8")
-        outcome = verify_password(password)
+        outcome = verify_password(password, sys.argv[1])
         sys.exit({"granted": 0, "denied": 1, "error": 2}[outcome])
     except (OSError, UnicodeError):
         sys.exit(2)

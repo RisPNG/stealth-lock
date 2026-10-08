@@ -4,6 +4,10 @@
     <value nick="stealth" value="0" />
     <value nick="normal" value="1" />
   </enum>
+  <enum id="org.gnome.shell.extensions.stealth-lock.AuthenticationMode">
+    <value nick="password" value="0" />
+    <value nick="system" value="1" />
+  </enum>
   <enum id="org.gnome.shell.extensions.stealth-lock.CursorMode">
     <value nick="lock-icon" value="0" />
     <value nick="normal" value="1" />
@@ -16,6 +20,39 @@
     <value nick="bl" value="3" />
   </enum>
   <schema id="org.gnome.shell.extensions.stealth-lock" path="/org/gnome/shell/extensions/stealth-lock/">
+    <key name="authentication-mode" enum="org.gnome.shell.extensions.stealth-lock.AuthenticationMode">
+      <default>'password'</default>
+      <summary>Authentication Mode</summary>
+      <description>Password keeps the desktop visible. System uses the native lock and its configured sign-in methods.</description>
+    </key>
+    <key name="pam-service" type="s">
+      <default>'gdm-password'</default>
+      <summary>Password PAM Service</summary>
+      <description>One explicitly configured administrator-owned service in /etc/pam.d. The default is gdm-password. No alternative services are tried automatically.</description>
+    </key>
+    <key name="retry-base-seconds" type="i">
+      <range min="1" max="30" />
+      <default>1</default>
+      <summary>Initial Retry Delay</summary>
+      <description>Initial delay after a rejected password, doubled after subsequent rejections.</description>
+    </key>
+    <key name="retry-max-seconds" type="i">
+      <range min="1" max="300" />
+      <default>30</default>
+      <summary>Maximum Retry Delay</summary>
+      <description>Upper bound for the exponential retry delay.</description>
+    </key>
+    <key name="password-reveal-timeout-seconds" type="i">
+      <range min="0" max="300" />
+      <default>10</default>
+      <summary>Password Reveal Timeout</summary>
+      <description>Hide a revealed password after this many seconds. Zero disables automatic concealment.</description>
+    </key>
+    <key name="password-audible-feedback" type="b">
+      <default>false</default>
+      <summary>Audible Authentication Feedback</summary>
+      <description>Use the system alert sound after a rejected or unavailable authentication attempt.</description>
+    </key>
     <key name="lock-hotkey" type="as">
       <default>['&lt;Super&gt;&lt;Control&gt;l']</default>
       <summary>Lock Hotkey</summary>
@@ -129,7 +166,7 @@
       <description>
         Which monitor to center the password prompt on when using fixed position.
         Empty string means center across all monitors.
-        Value is the monitor index (e.g. "0", "1").
+        Value is a stable monitor connector or an explicit monitor index.
       </description>
     </key>
     <key name="normal-prompt-fixed-x" type="i">
@@ -183,7 +220,7 @@
     <key name="visual-effect-presets" type="s">
       <default>'[]'</default>
       <summary>Saved Visual Effects</summary>
-      <description>JSON array of ordinary saved effect entries, each containing a name and JSON configuration in code. Starter entries are created once per settings profile and can be edited or removed.</description>
+      <description>JSON array of ordinary saved entries, each containing a name and JavaScript program in code. Starter entries are created once per settings profile and can be edited or removed. Programs run in an isolated visual renderer.</description>
     </key>
     <key name="visual-effect-active" type="s">
       <default>''</default>

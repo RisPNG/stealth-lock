@@ -6,6 +6,9 @@ import sys
 import time
 
 
+if len(sys.argv) != 2 or sys.argv[1] not in ("gdm-password", "custom-password"):
+    sys.exit(2)
+
 payload = sys.stdin.buffer.read()
 if not sys.flags.isolated or not sys.flags.dont_write_bytecode or (
     os.path.realpath(sys.executable) != os.path.realpath("/usr/bin/python3")

@@ -29,6 +29,7 @@ payload=(
     shell/lockSession.js
     shell/authentication.js
     helpers/authentication.py
+    helpers/visual-renderer.py
     shell/screenshot.js
     shell/overlay.js
     shell/integration.js
@@ -36,8 +37,12 @@ payload=(
     shell/input.js
     prefs.js
     shared/presets.js
-    shell/effects/backdrop.js
-    shell/effects/city.js
+    shared/starter-programs.js
+    shared/visual-api.js
+    shared/visual-frame.js
+    shared/visual-process.js
+    shared/runtime-state.js
+    shell/effects/renderer.js
     metadata.json
     stylesheet.css
     schemas/org.gnome.shell.extensions.stealth-lock.gschema.xml

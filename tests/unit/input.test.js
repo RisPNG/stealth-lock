@@ -3,24 +3,28 @@ import test from 'node:test';
 
 import {loadModule} from './harness.js';
 
-async function runtime({stealth = false, attached = true} = {}) {
+async function runtime({stealth = false, attached = true, revealTimeoutSeconds = 10} = {}) {
     const events = [];
     const callbacks = new Map();
+    const entryCallbacks = new Map();
+    const timers = new Map();
+    let nextTimer = 1;
     const lockdown = {disable_show_password: false};
     const peekChild = {};
     const peek = {contains: source => source === peekChild};
     const Clutter = {
         EVENT_PROPAGATE: false, EVENT_STOP: true,
         EventType: {KEY_PRESS: 1, KEY_RELEASE: 2, IM_COMMIT: 3, IM_DELETE: 4, IM_PREEDIT: 5,
-            BUTTON_PRESS: 6, BUTTON_RELEASE: 7, SCROLL: 8},
+            BUTTON_PRESS: 6, BUTTON_RELEASE: 7, SCROLL: 8, TOUCH_BEGIN: 9, TOUCH_UPDATE: 10, TOUCH_END: 11, TOUCH_CANCEL: 12},
         ModifierType: {CONTROL_MASK: 1, MOD1_MASK: 2, SHIFT_MASK: 4, SUPER_MASK: 8, META_MASK: 16},
-        KEY_r: 114, KEY_R: 82, KEY_u: 117, KEY_U: 85, KEY_Insert: 1000,
+        KEY_a: 97, KEY_A: 65, KEY_Home: 1006, KEY_End: 1007, KEY_Left: 1008, KEY_Right: 1009, KEY_Delete: 1010, KEY_r: 114, KEY_R: 82, KEY_u: 117, KEY_U: 85, KEY_Insert: 1000,
         KEY_Super_L: 1001, KEY_Super_R: 1002, KEY_Meta_L: 1003, KEY_Meta_R: 1004,
     };
     let actor;
     const stage = {
         focus: null,
         get_key_focus() { return this.focus; },
+        get_event_actor(event) { return event.get_source(); },
         set_key_focus(focus) {
             events.push(['focus', focus]);
             if (actor && this.focus && (this.focus === actor || actor.contains(this.focus))) {
@@ -64,8 +68,21 @@ async function runtime({stealth = false, attached = true} = {}) {
         }
         get password_visible() { return this._visible; }
         set password_visible(value) {
+            const changed = this._visible !== value;
             this._visible = value;
             events.push(['visible', value]);
+            if (changed)
+                entryCallbacks.get('notify::password-visible')?.();
+        }
+        connectObject(...arguments_) {
+            assert.equal(arguments_.at(-1), this);
+            for (let index = 0; index < arguments_.length - 1; index += 2)
+                entryCallbacks.set(arguments_[index], arguments_[index + 1]);
+        }
+        disconnectObject(owner) {
+            assert.equal(owner, this);
+            entryCallbacks.clear();
+            events.push('entry-disconnect');
         }
         set_size(width, height) { this.size = [width, height]; }
         get_stage() { return attached ? stage : null; }
@@ -84,14 +101,28 @@ async function runtime({stealth = false, attached = true} = {}) {
     }
     const {PasswordInput} = await loadModule('shell/input.js', {
         'gi://Clutter': {default: Clutter},
+        'gi://GLib': {default: {
+            PRIORITY_DEFAULT: 0, SOURCE_REMOVE: false,
+            timeout_add(_priority, milliseconds, callback) {
+                const id = nextTimer++;
+                timers.set(id, {milliseconds, callback});
+                return id;
+            },
+            Source: {remove(id) { assert.equal(timers.delete(id), true); }},
+        }},
         'gi://St': {default: {PasswordEntry: Entry, Settings: {get: () => lockdown}}},
     });
     const input = new PasswordInput({
-        stealth,
+        stealth, revealTimeoutSeconds,
         onSubmit: () => events.push('submit'),
         onActivity: () => events.push('activity'),
     });
-    return {input, actor, stage, events, callbacks, lockdown, peek, peekChild, Clutter,
+    return {input, actor, stage, events, callbacks, entryCallbacks, timers, lockdown, peek, peekChild, Clutter,
+        expire() {
+            const [id, timer] = timers.entries().next().value;
+            timers.delete(id);
+            assert.equal(timer.callback(), false);
+        },
         key: (key, modifiers = 0, unicode = key) => ({
             type: () => Clutter.EventType.KEY_PRESS, get_key_symbol: () => key,
             get_state: () => modifiers, get_key_unicode: () => unicode,
@@ -282,5 +313,83 @@ test('pointer permission is limited to the native reveal icon and its children',
             }
             assert.equal(input.handleEvent({type: () => Clutter.EventType.SCROLL}), Clutter.EVENT_STOP);
         });
+    }
+});
+
+test('native selection and cursor navigation propagate while clipboard and desktop combinations stop', async () => {
+    const {input, key, Clutter} = await runtime();
+    const {CONTROL_MASK: control, SHIFT_MASK: shift, MOD1_MASK: alt, SUPER_MASK: superKey} = Clutter.ModifierType;
+    for (const symbol of [Clutter.KEY_a, Clutter.KEY_A, Clutter.KEY_Home, Clutter.KEY_End, Clutter.KEY_Left, Clutter.KEY_Right]) {
+        assert.equal(input.handleEvent(key(symbol, control)), Clutter.EVENT_PROPAGATE);
+        assert.equal(input.handleEvent(key(symbol, control | shift)), Clutter.EVENT_PROPAGATE);
+        assert.equal(input.handleEvent(key(symbol, control | alt)), Clutter.EVENT_STOP);
+        assert.equal(input.handleEvent(key(symbol, control | superKey)), Clutter.EVENT_STOP);
+    }
+    for (const symbol of [99, 120, 118, Clutter.KEY_Insert, Clutter.KEY_Delete])
+        assert.equal(input.handleEvent(key(symbol, control)), Clutter.EVENT_STOP);
+    assert.equal(input.handleEvent(key(Clutter.KEY_Delete, shift)), Clutter.EVENT_STOP);
+    for (const symbol of [Clutter.KEY_Home, Clutter.KEY_End, Clutter.KEY_Left, Clutter.KEY_Right])
+        assert.equal(input.handleEvent(key(symbol)), Clutter.EVENT_PROPAGATE);
+});
+
+test('normal touch reveal follows an owned native icon sequence and leaves all other touch blocked', async t => {
+    for (const stealth of [false, true]) {
+        await t.test(stealth ? 'stealth' : 'normal', async () => {
+            const {input, peek, peekChild, lockdown, Clutter} = await runtime({stealth});
+            const event = (type, sequence, source) => ({type: () => type, get_event_sequence: () => sequence, get_source: () => source});
+            const sequence = {get_slot: () => 1};
+            const unrelated = {get_slot: () => 2};
+            assert.equal(input.handleEvent(event(Clutter.EventType.TOUCH_BEGIN, unrelated, {})), Clutter.EVENT_STOP);
+            assert.equal(input.handleEvent(event(Clutter.EventType.TOUCH_UPDATE, unrelated, peek)), Clutter.EVENT_STOP);
+            assert.equal(input.handleEvent(event(Clutter.EventType.TOUCH_BEGIN, sequence, peekChild)),
+                stealth ? Clutter.EVENT_STOP : Clutter.EVENT_PROPAGATE);
+            assert.equal(input.handleEvent(event(Clutter.EventType.TOUCH_UPDATE, sequence, peek)),
+                stealth ? Clutter.EVENT_STOP : Clutter.EVENT_PROPAGATE);
+            assert.equal(input.handleEvent(event(Clutter.EventType.TOUCH_UPDATE, {get_slot: () => 1}, peek)),
+                stealth ? Clutter.EVENT_STOP : Clutter.EVENT_PROPAGATE);
+            assert.equal(input.handleEvent(event(Clutter.EventType.TOUCH_UPDATE, sequence, {})), Clutter.EVENT_STOP);
+            lockdown.disable_show_password = true;
+            assert.equal(input.handleEvent(event(Clutter.EventType.TOUCH_END, sequence, peek)), Clutter.EVENT_STOP);
+            assert.equal(input._revealTouches.size, 0);
+            lockdown.disable_show_password = false;
+            assert.equal(input.handleEvent(event(Clutter.EventType.TOUCH_UPDATE, sequence, peek)), Clutter.EVENT_STOP);
+            input.handleEvent(event(Clutter.EventType.TOUCH_BEGIN, sequence, peek));
+            input.handleEvent(event(Clutter.EventType.TOUCH_CANCEL, sequence, peek));
+            assert.equal(input._revealTouches.size, 0);
+            input.handleEvent(event(Clutter.EventType.TOUCH_BEGIN, sequence, peek));
+            input.discardPassword();
+            assert.equal(input._revealTouches.size, 0);
+        });
+    }
+});
+
+test('native icon and shortcut visibility changes share one reveal deadline and discard removes it', async () => {
+    const {input, actor, timers, expire, key, Clutter} = await runtime({revealTimeoutSeconds: 3});
+    actor.password_visible = true;
+    assert.equal(timers.size, 1);
+    assert.equal([...timers.values()][0].milliseconds, 3000);
+    expire();
+    assert.equal(actor.password_visible, false);
+    assert.equal(timers.size, 0);
+    input.handleEvent(key(Clutter.KEY_r, Clutter.ModifierType.CONTROL_MASK));
+    assert.equal(timers.size, 1);
+    input.handleEvent(key(Clutter.KEY_r, Clutter.ModifierType.CONTROL_MASK));
+    assert.equal(timers.size, 0);
+    actor.password_visible = true;
+    input.discardPassword();
+    assert.equal(timers.size, 0);
+    actor.password_visible = true;
+    input.destroy();
+    assert.equal(timers.size, 0);
+});
+
+test('zero reveal timeout retains native explicit concealment and stealth never owns a reveal source', async () => {
+    for (const options of [{revealTimeoutSeconds: 0}, {stealth: true}]) {
+        const {input, actor, timers} = await runtime(options);
+        actor.password_visible = true;
+        assert.equal(timers.size, 0);
+        input.discardPassword();
+        assert.equal(actor.password_visible, false);
+        input.destroy();
     }
 });

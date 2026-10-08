@@ -8,9 +8,11 @@ import Pango from 'gi://Pango';
 import St from 'gi://St';
 
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
+import {CapsLockWarning} from 'resource:///org/gnome/shell/ui/shellEntry.js';
+import {getInputSourceManager} from 'resource:///org/gnome/shell/ui/status/keyboard.js';
 
-import {BackdropEffect} from './effects/backdrop.js';
-import {readSavedEntries, validateEffectConfig} from '../shared/presets.js';
+import {VisualEffect} from './effects/renderer.js';
+import {readSavedEntries} from '../shared/presets.js';
 
 const LOCK_CURSOR_XBM = {
     width: 28,
@@ -52,7 +54,8 @@ const LOCK_CURSOR_XBM = {
 };
 
 export class LockOverlay {
-    constructor(settings, inputActor, cancellable) {
+    constructor(settings, inputActor, cancellable, path) {
+        this.path = path;
         this.settings = settings;
         this.inputActor = inputActor;
         this.effect = null;
@@ -90,6 +93,17 @@ export class LockOverlay {
             this.status.clutter_text.ellipsize = Pango.EllipsizeMode.NONE;
             this.status.visible = false;
             this.prompt.add_child(this.status);
+            if (this.prompt.visible) {
+                this.prompt.add_child(new CapsLockWarning());
+                const inputSources = getInputSourceManager();
+                this.layoutLabel = new St.Label({style_class: 'stealth-lock-status',
+                    text: inputSources.currentSource?.displayName ?? ''});
+                this.prompt.add_child(this.layoutLabel);
+                inputSources.connectObject('current-source-changed', () => {
+                    this.layoutLabel.text = inputSources.currentSource?.displayName ?? '';
+                    this.positionPrompt();
+                }, this.actor);
+            }
             this.info = new St.Label({style_class: 'stealth-lock-info', x: 12, y: 12});
             this.actor.add_child(this.info);
             this.info.visible = settings.get_boolean('debug-mode') && settings.get_boolean('debug-show-info');
@@ -212,8 +226,9 @@ export class LockOverlay {
             const entry = readSavedEntries(this.settings, 'visual-effect-presets').find(preset => preset.name === active);
             if (!entry)
                 return;
-            this.effect = new BackdropEffect({
+            this.effect = new VisualEffect({
                 parent: this.actor,
+                path: this.path,
                 width: this.width,
                 height: this.height,
                 monitors: this.monitors,
@@ -221,7 +236,7 @@ export class LockOverlay {
                 originX: this.originX,
                 originY: this.originY,
                 promptMonitor: this.settings.get_string('normal-prompt-monitor'),
-            }, validateEffectConfig(entry.code));
+            }, entry.code);
             this.actor.set_child_above_sibling(this.effect.layer, this.background);
         } catch (error) {
             console.debug(`Stealth Lock: visual effect is unavailable: ${error.message}`);
@@ -232,6 +247,21 @@ export class LockOverlay {
         this.prompt.style = this.settings.get_string('normal-prompt-css');
         this.backdrop.style = this.settings.get_string('normal-background-css');
         this.positionPrompt();
+    }
+
+    relayout() {
+        this.monitors = Main.layoutManager.monitors.map(monitor => ({...monitor}));
+        if (!this.monitors.length)
+            throw new Error('No monitor is available for the privacy screen');
+        this.originX = Math.min(...this.monitors.map(monitor => monitor.x));
+        this.originY = Math.min(...this.monitors.map(monitor => monitor.y));
+        this.width = Math.max(...this.monitors.map(monitor => monitor.x + monitor.width)) - this.originX;
+        this.height = Math.max(...this.monitors.map(monitor => monitor.y + monitor.height)) - this.originY;
+        this.actor.set_position(this.originX, this.originY);
+        for (const actor of [this.actor, this.background, this.backdrop])
+            actor.set_size(this.width, this.height);
+        this.movePointer(...global.get_pointer());
+        this.refreshEffect();
     }
 
     movePointer(stageX, stageY) {
@@ -262,8 +292,9 @@ export class LockOverlay {
             y = this.pointerY + (anchor.startsWith('t') ? -height - offsetY : offsetY);
         } else {
             const monitor = this.settings.get_string('normal-prompt-monitor');
-            if (monitor !== '' && this.monitors[Number(monitor)])
-                bounds = this.monitors[Number(monitor)];
+            const index = monitor === '' ? -1 : /^\d+$/u.test(monitor) ? Number(monitor) : global.display.get_monitor_index_for_connector(monitor);
+            if (monitor !== '' && this.monitors[index])
+                bounds = this.monitors[index];
             const fixedX = this.settings.get_int('normal-prompt-fixed-x');
             const fixedY = this.settings.get_int('normal-prompt-fixed-y');
             x = fixedX < 0 ? bounds.x + (bounds.width - width) / 2 : this.originX + fixedX;

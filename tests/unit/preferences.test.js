@@ -1,10 +1,11 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import {compileFunction} from 'node:vm';
 
 import * as Presets from '../../shared/presets.js';
-import {Cancellable, loadModule} from './harness.js';
+import {Cancellable, deferred, loadModule} from './harness.js';
 
-async function preferencesWindow({values = {}, autoResetRange = [0, 3600]} = {}) {
+async function preferencesWindow({values = {}, autoResetRange = [0, 3600], monitors = []} = {}) {
     const widgets = [];
     class Widget {
         constructor(properties = {}) {
@@ -53,10 +54,18 @@ async function preferencesWindow({values = {}, autoResetRange = [0, 3600]} = {})
                 this.emit('notify::value');
             }
         }
+        get text() { return this._text ?? ''; }
+        set text(value) {
+            if (value !== this.text) {
+                this._text = value;
+                this.emit('notify::text');
+            }
+        }
         destroy() { this.destroyed = true; }
     }
     const enumValues = {
         'cursor-mode': ['lock-icon', 'normal', 'hidden'],
+        'authentication-mode': ['password', 'system'],
         'lock-type': ['stealth', 'normal'],
         'normal-prompt-cursor-anchor': ['br', 'tr', 'tl', 'bl'],
     };
@@ -72,6 +81,12 @@ async function preferencesWindow({values = {}, autoResetRange = [0, 3600]} = {})
         'freeze-display': true,
         'pause-media': true,
         'auto-reset-seconds': 5,
+        'authentication-mode': 'password',
+        'pam-service': 'gdm-password',
+        'retry-base-seconds': 1,
+        'retry-max-seconds': 30,
+        'password-reveal-timeout-seconds': 10,
+        'password-audible-feedback': false,
         'cursor-mode': 'lock-icon',
         'lock-type': 'stealth',
         'normal-prompt-follow-cursor': false,
@@ -89,7 +104,8 @@ async function preferencesWindow({values = {}, autoResetRange = [0, 3600]} = {})
     const settings = new Widget();
     const bindings = [];
     settings.settings_schema = {get_key: key => ({get_range: () => ({recursiveUnpack: () => [
-        'range', key === 'auto-reset-seconds' ? autoResetRange : [-2147483648, 2147483647],
+        'range', {'auto-reset-seconds': autoResetRange, 'retry-base-seconds': [1, 30],
+            'retry-max-seconds': [1, 300], 'password-reveal-timeout-seconds': [0, 300]}[key] ?? [-2147483648, 2147483647],
     ]})})};
     settings.get_string = settings.get_boolean = settings.get_strv = key => current[key];
     settings.get_enum = key => enumValues[key].indexOf(current[key]);
@@ -114,6 +130,7 @@ async function preferencesWindow({values = {}, autoResetRange = [0, 3600]} = {})
     class Names {
         constructor(items) { this.items = items; }
         get_n_items() { return this.items.length; }
+        append(item) { this.items.push(item); }
         splice(position, removed, additions) { this.items.splice(position, removed, ...additions); }
     }
     const {default: Preferences} = await loadModule('prefs.js', {
@@ -122,7 +139,8 @@ async function preferencesWindow({values = {}, autoResetRange = [0, 3600]} = {})
             SwitchRow: Widget, SpinRow: Widget, ComboRow: Widget, EntryRow: Widget,
         }},
         'gi://Gdk': {default: {
-            RGBA: Widget, Display: {get_default: () => ({get_monitors: () => ({get_n_items: () => 0})})},
+            RGBA: Widget, Display: {get_default: () => ({get_monitors: () => ({get_n_items: () => monitors.length,
+                get_item: index => ({get_connector: () => monitors[index].connector, get_model: () => monitors[index].model})})})},
         }},
         'gi://Gio': {default: {Cancellable, SettingsBindFlags: {DEFAULT: 0, GET: 1, NO_SENSITIVITY: 4}}},
         'gi://GLib': {default: {}},
@@ -131,7 +149,9 @@ async function preferencesWindow({values = {}, autoResetRange = [0, 3600]} = {})
             ColorDialog: Widget, StringList: {new: items => new Names(items)}, Align: {CENTER: 3},
         }},
         './shared/presets.js': Presets,
-        'resource:///org/gnome/Shell/Extensions/js/extensions/prefs.js': {ExtensionPreferences: class {}, gettext: value => value},
+        './shared/visual-process.js': {VisualProcess: class {}},
+        'resource:///org/gnome/Shell/Extensions/js/extensions/prefs.js': {ExtensionPreferences: class {},
+            gettext: value => value.includes('%s') ? {format: replacement => value.replace('%s', replacement)} : value},
     });
     const preferences = new Preferences();
     preferences.getSettings = () => settings;
@@ -140,7 +160,38 @@ async function preferencesWindow({values = {}, autoResetRange = [0, 3600]} = {})
     return {preferences, window, settings, current, bindings, widgets, row: title => widgets.find(widget => widget.title === title)};
 }
 
-async function editor({key = 'visual-effect-active', library = '[]', active = ''} = {}) {
+async function editor({key = 'visual-effect-active', library = '[]', active = '', pauseChecks = false} = {}) {
+    const workers = [];
+    const checks = [];
+    class VisualProcess {
+        constructor(path, parent) {
+            parent.set_error_if_cancelled();
+            this.path = path;
+            this.parent = parent;
+            this.closed = false;
+            this.parentSignal = parent.connect(() => this.destroy());
+            workers.push(this);
+        }
+        async request(frame) {
+            assert.equal(frame.event, 'check');
+            compileFunction(frame.code, ['ctx']);
+            if (pauseChecks) {
+                this.pending = deferred();
+                checks.push(this.pending);
+                await this.pending.promise;
+            }
+            if (this.closed)
+                throw new Error('visual check cancelled');
+            return {valid: true};
+        }
+        destroy() {
+            if (!this.closed) {
+                this.closed = true;
+                this.parent.disconnect(this.parentSignal);
+                this.pending?.reject(new Error('visual check cancelled'));
+            }
+        }
+    }
     class Widget {
         constructor(properties = {}) {
             this.handlers = new Map();
@@ -155,8 +206,7 @@ async function editor({key = 'visual-effect-active', library = '[]', active = ''
             this.handlers.get(signal).push(callback);
         }
         emit(signal, ...args) {
-            for (const callback of this.handlers.get(signal) ?? [])
-                callback(this, ...args);
+            return Promise.all((this.handlers.get(signal) ?? []).map(callback => callback(this, ...args)));
         }
         append(child) { this.children.push(child); }
         set_child(child) { this.children = [child]; }
@@ -165,6 +215,12 @@ async function editor({key = 'visual-effect-active', library = '[]', active = ''
         set_margin_start() {}
         set_margin_end() {}
         set_spacing() {}
+        add_css_class(name) {
+            this.css_classes ??= [];
+            if (!this.css_classes.includes(name))
+                this.css_classes.push(name);
+        }
+        remove_css_class(name) { this.css_classes = this.css_classes?.filter(value => value !== name) ?? []; }
         get text() { return this._text ?? ''; }
         set text(value) { this._text = value; this.emit('changed'); }
         destroy() { this.destroyed = true; }
@@ -206,17 +262,19 @@ async function editor({key = 'visual-effect-active', library = '[]', active = ''
             this.children.push(button);
             return button;
         }
-        response(value) { this.emit('response', value); }
+        response(value) { return this.emit('response', value); }
     }
     const Gtk = {
         Dialog, Label: Widget, Entry: Widget, Box: Widget, Button: Widget, DropDown: Selector,
         ScrolledWindow: Widget, TextView, StringList: {new: values => new Names(values)},
         Orientation: {HORIZONTAL: 0}, WrapMode: {NONE: 0}, ResponseType: {CANCEL: -6, OK: -5},
         INVALID_LIST_POSITION: 0xffffffff,
+        Align: {START: 0},
     };
     const {default: Preferences} = await loadModule('prefs.js', {
-        'gi://Adw': {default: {}}, 'gi://Gdk': {default: {}}, 'gi://Gio': {default: {}},
+        'gi://Adw': {default: {}}, 'gi://Gdk': {default: {}}, 'gi://Gio': {default: {Cancellable}},
         'gi://GLib': {default: {}}, 'gi://Gtk': {default: Gtk}, './shared/presets.js': Presets,
+        './shared/visual-process.js': {VisualProcess},
         'resource:///org/gnome/Shell/Extensions/js/extensions/prefs.js': {ExtensionPreferences: class {}, gettext: value => value},
     }, {console: {error() {}}});
     const entriesKey = key === 'visual-effect-active' ? 'visual-effect-presets' : key + '-saved-entries';
@@ -228,6 +286,8 @@ async function editor({key = 'visual-effect-active', library = '[]', active = ''
     };
     const preferences = new Preferences();
     preferences._dialogs = new Set();
+    preferences._cancellable = new Cancellable();
+    preferences.path = '/installed-extension';
     preferences._showSavedEntryEditor({}, settings, key, 'Test', 'Saved entries');
     const dialog = [...preferences._dialogs][0];
     const widgets = [];
@@ -235,15 +295,15 @@ async function editor({key = 'visual-effect-active', library = '[]', active = ''
     visit(dialog);
     const button = label => widgets.find(widget => widget.label === label && widget instanceof Widget);
     return {
-        preferences, dialog, values, writes, entriesKey,
+        preferences, dialog, values, writes, entriesKey, workers, checks,
         buffer: widgets.find(widget => widget instanceof TextView).buffer,
         selector: widgets.find(widget => widget instanceof Selector),
         name: widgets.find(widget => widget.placeholder_text === 'Saved entry name'),
         validation: widgets.find(widget => widget.css_classes?.includes('error')),
         button,
-        click(label) { assert.equal(button(label).sensitive, true, label + ' should be usable'); button(label).emit('clicked'); },
-        apply() { dialog.response(Gtk.ResponseType.OK); },
-        cancel() { dialog.response(Gtk.ResponseType.CANCEL); },
+        click(label) { assert.equal(button(label).sensitive, true, label + ' should be usable'); return button(label).emit('clicked'); },
+        apply() { return dialog.response(Gtk.ResponseType.OK); },
+        cancel() { return dialog.response(Gtk.ResponseType.CANCEL); },
     };
 }
 
@@ -334,12 +394,93 @@ test('spin rows honor schema ranges and window closure cancels owned dialogs and
     assert.equal(state.settings.handlers.size, settingsListeners - 1, 'the preferences-owned changed listener is disconnected');
 });
 
+test('authentication service retry reveal and audible preferences persist through native settings bindings', async () => {
+    const state = await preferencesWindow();
+    assert.equal(state.row('Authentication').selected, 0);
+    state.row('Authentication').selected = 1;
+    assert.equal(state.current['authentication-mode'], 'system');
+    state.settings.set_string('authentication-mode', 'password');
+    assert.equal(state.row('Authentication').selected, 0);
+    assert.equal(state.row('Password PAM Service').text, 'gdm-password');
+    state.row('Password PAM Service').text = 'system-local-login';
+    assert.equal(state.current['pam-service'], 'system-local-login');
+    for (const [title, key, initial, range, changed] of [
+        ['Initial Retry Delay', 'retry-base-seconds', 1, [1, 30], 7],
+        ['Maximum Retry Delay', 'retry-max-seconds', 30, [1, 300], 100],
+        ['Reveal Timeout', 'password-reveal-timeout-seconds', 10, [0, 300], 0],
+    ]) {
+        const row = state.row(title);
+        assert.equal(row.value, initial);
+        assert.deepEqual([row.adjustment.lower, row.adjustment.upper], range);
+        row.value = changed;
+        assert.equal(state.current[key], changed);
+    }
+    assert.equal(state.row('Audible Authentication Feedback').active, false);
+    state.row('Audible Authentication Feedback').active = true;
+    assert.equal(state.current['password-audible-feedback'], true);
+    state.window.emit('close-request');
+    const reopened = await preferencesWindow({values: state.current});
+    assert.equal(reopened.row('Password PAM Service').text, 'system-local-login');
+    assert.equal(reopened.row('Initial Retry Delay').value, 7);
+    assert.equal(reopened.row('Maximum Retry Delay').value, 100);
+    assert.equal(reopened.row('Reveal Timeout').value, 0);
+    assert.equal(reopened.row('Audible Authentication Feedback').active, true);
+    reopened.window.emit('close-request');
+});
+
+test('monitor selection stores stable connectors instead of the current display index', async () => {
+    const state = await preferencesWindow({monitors: [
+        {connector: 'DP-1', model: 'Primary display'}, {connector: 'HDMI-A-1', model: 'Secondary display'},
+    ], values: {'normal-prompt-monitor': 'HDMI-A-1'}});
+    assert.equal(state.row('Monitor').selected, 2);
+    state.row('Monitor').selected = 1;
+    assert.equal(state.current['normal-prompt-monitor'], 'DP-1');
+    state.settings.set_string('normal-prompt-monitor', 'DP-7');
+    assert.equal(state.row('Monitor').selected, 3);
+    assert.equal(state.current['normal-prompt-monitor'], 'DP-7');
+    assert.equal(state.row('Monitor').model.items[3], 'Monitor DP-7 (disconnected)');
+    state.window.emit('close-request');
+    const reordered = await preferencesWindow({monitors: [
+        {connector: 'HDMI-A-1', model: 'Secondary display'}, {connector: 'DP-1', model: 'Primary display'},
+    ], values: {'normal-prompt-monitor': 'DP-1'}});
+    assert.equal(reordered.row('Monitor').selected, 2);
+    assert.equal(reordered.current['normal-prompt-monitor'], 'DP-1');
+    reordered.window.emit('close-request');
+});
+
+test('window cancellation kills an in-progress syntax checker and ignores its completion', async () => {
+    const state = await editor({pauseChecks: true});
+    const checking = state.click('Check JavaScript');
+    assert.equal(state.workers.length, 1);
+    assert.equal(state.button('Check JavaScript').sensitive, false);
+    state.preferences._cancellable.cancel();
+    state.dialog.destroy();
+    state.preferences._dialogs.clear();
+    await checking;
+    assert.equal(state.workers[0].closed, true);
+    assert.deepEqual(state.writes, []);
+    assert.equal(state.preferences._cancellable.handlers.size, 0);
+});
+
+test('cancelling Apply releases its checker and never selects a program after the editor closes', async () => {
+    const state = await editor({pauseChecks: true});
+    state.name.text = 'New program';
+    const applying = state.apply();
+    assert.equal(state.workers.length, 1);
+    assert.equal(state.button('Apply').sensitive, false);
+    await state.cancel();
+    await applying;
+    assert.ok(state.workers.every(worker => worker.closed));
+    assert.deepEqual(state.writes, []);
+    assert.equal(state.preferences._dialogs.size, 0);
+});
+
 test('starter presets use the same editable, renamable and deletable flow as user presets', async () => {
     const state = await editor({library: JSON.stringify(Presets.DEFAULT_EFFECT_PRESETS), active: 'Neo Rain'});
     assert.equal(state.selector.selected, 1);
-    state.buffer.set_text(JSON.stringify({effect: 'blur', knobs: {radius: 4}}));
+    state.buffer.set_text('ctx.blur(4);');
     state.click('Replace Saved');
-    assert.deepEqual(JSON.parse(JSON.parse(state.values[state.entriesKey])[1].code), {effect: 'blur', knobs: {radius: 4}});
+    assert.equal(JSON.parse(state.values[state.entriesKey])[1].code, 'ctx.blur(4);');
     state.name.text = 'My edited preset';
     state.click('Rename');
     assert.equal(state.values['visual-effect-active'], 'My edited preset');
@@ -347,31 +488,97 @@ test('starter presets use the same editable, renamable and deletable flow as use
     state.click('Delete');
     assert.equal(state.values['visual-effect-active'], '');
     assert.deepEqual(JSON.parse(state.values[state.entriesKey]).map(entry => entry.name), ['Dim and Blur', 'City Grow']);
-    state.cancel();
+    await state.cancel();
     assert.equal(state.preferences._dialogs.size, 0);
     assert.equal(state.dialog.destroyed, true);
 });
 
-test('invalid configurations keep the dialog open and cannot overwrite or activate saved effects', async () => {
-    const library = JSON.stringify([{name: 'Rain', code: '{"effect":"neo-rain"}'}]);
+test('invalid JavaScript syntax keeps the editor open and cannot activate or replace a program through Apply', async () => {
+    const library = JSON.stringify([{name: 'Rain', code: 'ctx.draw.paint();'}]);
     const state = await editor({library});
-    for (const code of ['not JSON', '{"effect":"neo-rain","knobs":{"script":"run()"}}']) {
+    for (const code of ['if (', 'const missing = ;']) {
+        state.buffer.set_text(code);
+        assert.equal(state.validation.visible, false, 'typing permits unfinished draft syntax');
+        assert.equal(state.button('Save As New').sensitive, true);
+        assert.equal(state.button('Replace Saved').sensitive, true);
+        await state.click('Check JavaScript');
+        assert.equal(state.validation.visible, true);
+        assert.equal(state.validation.css_classes.includes('error'), true);
+        await state.apply();
+        assert.equal(state.values[state.entriesKey], library);
+        assert.equal(state.values['visual-effect-active'], '');
+        assert.equal(state.dialog.destroyed, undefined);
+    }
+    state.buffer.set_text('ctx.clock({visible:true});');
+    assert.equal(state.validation.visible, false);
+    await state.apply();
+    assert.equal(state.values['visual-effect-active'], 'Rain');
+    assert.equal(JSON.parse(state.values[state.entriesKey])[0].code, 'ctx.clock({visible:true});');
+    assert.equal(state.preferences._dialogs.size, 0);
+    assert.ok(state.workers.every(worker => worker.closed));
+});
+
+test('empty NUL and oversized JavaScript text cannot be saved or sent to the compiler', async () => {
+    const state = await editor();
+    for (const code of ['', '\0', 'x'.repeat(512 * 1024 + 1)]) {
         state.buffer.set_text(code);
         assert.equal(state.validation.visible, true);
         assert.equal(state.button('Apply').sensitive, false);
         assert.equal(state.button('Save As New').sensitive, false);
         assert.equal(state.button('Replace Saved').sensitive, false);
-        state.apply();
-        assert.equal(state.values[state.entriesKey], library);
+        await state.apply();
+        assert.equal(state.values[state.entriesKey], '[]');
         assert.equal(state.values['visual-effect-active'], '');
-        assert.equal(state.dialog.destroyed, undefined);
+        assert.equal(state.workers.length, 0);
     }
-    state.buffer.set_text('{"effect":"city-grow","knobs":{"clock":{"visible":true}}}');
-    assert.equal(state.validation.visible, false);
-    state.apply();
-    assert.equal(state.values['visual-effect-active'], 'Rain');
-    assert.equal(JSON.parse(JSON.parse(state.values[state.entriesKey])[0].code).effect, 'city-grow');
-    assert.equal(state.preferences._dialogs.size, 0);
+    await state.cancel();
+});
+
+test('Check verifies syntax without running source or changing saved entries and selection', async () => {
+    const state = await editor();
+    state.buffer.set_text('throw new Error("this must not run");');
+    await state.click('Check JavaScript');
+    assert.equal(state.validation.label, 'JavaScript syntax is valid');
+    assert.equal(state.validation.css_classes.includes('error'), false);
+    assert.equal(state.workers[0].path, '/installed-extension');
+    assert.equal(state.workers[0].closed, true);
+    assert.deepEqual(state.writes, []);
+    assert.equal(state.button('Check JavaScript').sensitive, true);
+    await state.cancel();
+});
+
+test('a pending Check disables editing and Apply until its own checker has completed', async () => {
+    const state = await editor({pauseChecks: true});
+    const checking = state.click('Check JavaScript');
+    assert.equal(state.button('Apply').sensitive, false);
+    assert.equal(state.dialog.content.sensitive, false);
+    await state.apply();
+    assert.equal(state.workers.length, 1, 'disabled Apply must not replace the current checker');
+    state.checks[0].resolve();
+    await checking;
+    assert.equal(state.workers[0].closed, true);
+    assert.equal(state.button('Apply').sensitive, true);
+    assert.equal(state.dialog.content.sensitive, true);
+    const applying = state.apply();
+    assert.equal(state.workers.length, 2);
+    state.checks[1].resolve();
+    await applying;
+    assert.equal(state.values['visual-effect-active'], 'New effect');
+    assert.equal(state.dialog.destroyed, true);
+    assert.ok(state.workers.every(worker => worker.closed));
+});
+
+test('ordinary saved entries may retain unfinished syntax drafts while activation remains independently checked', async () => {
+    const state = await editor();
+    state.name.text = 'Work in progress';
+    state.buffer.set_text('if (');
+    await state.click('Save As New');
+    assert.deepEqual(JSON.parse(state.values[state.entriesKey]), [{name: 'Work in progress', code: 'if ('}]);
+    assert.equal(state.values['visual-effect-active'], '');
+    await state.apply();
+    assert.equal(state.dialog.destroyed, undefined);
+    assert.equal(state.values['visual-effect-active'], '');
+    await state.cancel();
 });
 
 test('malformed CSS and effect libraries retain their original stored values', async t => {
@@ -388,15 +595,15 @@ test('malformed CSS and effect libraries retain their original stored values', a
                 assert.equal(state.button('Save As New').sensitive, false);
                 if (key === 'visual-effect-active') {
                     assert.equal(state.button('Apply').sensitive, false);
-                    state.apply();
+                    await state.apply();
                     assert.equal(state.dialog.destroyed, undefined);
                 } else {
                     state.buffer.set_text('padding: 4px;');
-                    state.apply();
+                    await state.apply();
                     assert.equal(state.values[key], 'padding: 4px;');
                 }
                 assert.equal(state.values[state.entriesKey], library);
-                state.cancel();
+                await state.cancel();
             });
         }
     }
@@ -406,20 +613,20 @@ test('cancelling an unsaved effect draft changes neither library nor selection',
     const state = await editor();
     assert.equal(state.values[state.entriesKey], '[]', 'opening the editor must not insert its sample');
     state.name.text = 'Unsaved effect';
-    state.buffer.set_text('{"effect":"blur","knobs":{"radius":80}}');
-    state.cancel();
+    state.buffer.set_text('ctx.blur(80);');
+    await state.cancel();
     assert.deepEqual(state.writes, []);
     assert.equal(state.preferences._dialogs.size, 0);
     assert.equal(state.dialog.destroyed, true);
 });
 
 test('new effect names remain unique against stored names with whitespace or differing case', async () => {
-    const state = await editor({library: JSON.stringify([{name: ' Rain ', code: '{"effect":"neo-rain"}'}])});
+    const state = await editor({library: JSON.stringify([{name: ' Rain ', code: 'ctx.draw.paint();'}])});
     state.name.text = 'rain';
     state.click('Save As New');
     const entries = JSON.parse(state.values[state.entriesKey]);
     assert.deepEqual(entries.map(entry => entry.name), [' Rain ', 'rain (2)']);
     assert.doesNotThrow(() => Presets.readSavedEntries({get_string: () => state.values[state.entriesKey]}, state.entriesKey));
-    state.apply();
+    await state.apply();
     assert.equal(state.values['visual-effect-active'], 'rain (2)');
 });

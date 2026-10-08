@@ -54,7 +54,8 @@ try {
     const preferences = extension.stateObj;
     const settings = preferences.getSettings();
     const starters = JSON.parse(settings.get_string('visual-effect-presets'));
-    assert(starters.length === 3 && new Set(starters.map(entry => JSON.parse(entry.code).effect)).size === 3, 'Fresh profile seeds three ordinary effect entries');
+    assert(starters.length === 3 && new Set(starters.map(entry => entry.name)).size === 3 &&
+        starters.every(entry => entry.code.includes('ctx.event') && entry.code.includes('ctx.draw')), 'Fresh profile seeds three ordinary JavaScript entries');
     assert(settings.get_boolean('visual-effect-initialized') && settings.get_string('visual-effect-active') === '', 'Starter effects initialize once and remain inactive');
     window.present();
     await waitFor(() => window.is_active, 'Actual Extensions preferences window gains native focus');
@@ -182,34 +183,50 @@ try {
     }
     const effectRow = findWidget(window, widget => widget instanceof Adw.ComboRow && widget.title === 'Visual Effect');
     assert(effectRow.model.get_n_items() === 4 && effectRow.selected === 0, 'Native effect selector offers None and all ordinary entries');
-    preferences._showSavedEntryEditor(window, settings, 'visual-effect-active', 'Visual Effect Presets', 'Native effect test');
+    preferences._showSavedEntryEditor(window, settings, 'visual-effect-active', 'Visual Effect Programs', 'Native effect test');
     let effectDialog = [...preferences._dialogs][0];
     let selector = findWidget(effectDialog, widget => widget instanceof Gtk.DropDown);
     let effectBuffer = findWidget(effectDialog, widget => widget instanceof Gtk.TextView).buffer;
     for (let index = 0; index < starters.length; index++) {
         selector.selected = index;
         findWidget(effectDialog, widget => widget instanceof Gtk.Button && widget.label === 'Load Saved').emit('clicked');
-        const config = JSON.parse(effectBuffer.text);
-        config.knobs.intervalMs = 55 + index * 5;
-        effectBuffer.set_text(JSON.stringify(config), -1);
+        assert(effectBuffer.text === starters[index].code, 'Loading a starter retrieves its ordinary JavaScript source');
+        const edited = starters[index].code + `\nif (ctx.event !== 'destroy') ctx.clock({visible: true, fontSize: ${24 + index}});`;
+        effectBuffer.set_text(edited, -1);
+        const check = findWidget(effectDialog, widget => widget instanceof Gtk.Button && widget.label === 'Check JavaScript');
+        check.emit('clicked');
+        await waitFor(() => check.sensitive, 'Isolated JavaScript syntax check completes');
+        assert(findWidget(effectDialog, widget => widget instanceof Gtk.Label && widget.label === 'JavaScript syntax is valid'),
+            'Edited starter compiles through isolated JavaScript syntax checker');
         findWidget(effectDialog, widget => widget instanceof Gtk.Button && widget.label === 'Replace Saved').emit('clicked');
-        assert(JSON.parse(JSON.parse(settings.get_string('visual-effect-presets'))[index].code).knobs.intervalMs === config.knobs.intervalMs,
-            'Each starter is editable as an ordinary saved entry');
+        assert(JSON.parse(settings.get_string('visual-effect-presets'))[index].code === edited,
+            'Each starter is editable as an ordinary user program');
         assert(settings.get_string('visual-effect-active') === '', 'Loading or replacing a draft never activates it');
     }
     const retained = settings.get_string('visual-effect-presets');
-    effectBuffer.set_text('{"effect":"blur","knobs":{"unknown":1}}', -1);
-    assert(!effectDialog.get_widget_for_response(Gtk.ResponseType.OK).sensitive, 'Unknown knob disables Apply');
+    effectBuffer.set_text('', -1);
+    assert(!effectDialog.get_widget_for_response(Gtk.ResponseType.OK).sensitive, 'Empty JavaScript disables Apply');
     effectDialog.response(Gtk.ResponseType.OK);
-    assert(preferences._dialogs.has(effectDialog) && settings.get_string('visual-effect-presets') === retained, 'Invalid configuration stays open and preserves saved entries');
-    effectBuffer.set_text('{"effect":"blur","knobs":{}}', -1);
+    assert(preferences._dialogs.has(effectDialog) && settings.get_string('visual-effect-presets') === retained, 'Invalid source stays open and preserves saved entries');
+    effectBuffer.set_text('if (', -1);
+    const check = findWidget(effectDialog, widget => widget instanceof Gtk.Button && widget.label === 'Check JavaScript');
+    check.emit('clicked');
+    await waitFor(() => check.sensitive, 'Invalid JavaScript syntax check completes');
+    assert(findWidget(effectDialog, widget => widget instanceof Gtk.Label && widget.visible && widget.has_css_class('error') && widget.label.includes('program')),
+        'Invalid JavaScript receives isolated syntax feedback');
+    effectDialog.response(Gtk.ResponseType.OK);
+    await waitFor(() => effectDialog.get_widget_for_response(Gtk.ResponseType.OK).sensitive, 'Invalid Apply finishes its isolated syntax check');
+    assert(preferences._dialogs.has(effectDialog) && settings.get_string('visual-effect-presets') === retained && settings.get_string('visual-effect-active') === '',
+        'Apply refuses invalid syntax without saving or activating it');
+    effectBuffer.set_text("if (ctx.event === 'destroy') return;\nctx.blur(7, 0.8);\nctx.draw.setSourceRGBA(...ctx.colors.foreground);\nctx.draw.rectangle(20, 20, 80, 40);\nctx.draw.fill();", -1);
     const effectName = findWidget(effectDialog, widget => widget instanceof Gtk.Entry);
     effectName.text = 'Native custom effect';
     findWidget(effectDialog, widget => widget instanceof Gtk.Button && widget.label === 'Save As New').emit('clicked');
     effectDialog.response(Gtk.ResponseType.OK);
-    assert(settings.get_string('visual-effect-active') === 'Native custom effect', 'Apply selects a saved custom configuration');
+    await waitFor(() => !preferences._dialogs.has(effectDialog), 'Valid Apply completes isolated syntax checking before activation');
+    assert(settings.get_string('visual-effect-active') === 'Native custom effect', 'Apply selects an ordinary saved custom program');
     assert(effectRow.selected === 4, 'Native effect selector follows active saved name');
-    preferences._showSavedEntryEditor(window, settings, 'visual-effect-active', 'Visual Effect Presets', 'Native effect test');
+    preferences._showSavedEntryEditor(window, settings, 'visual-effect-active', 'Visual Effect Programs', 'Native effect test');
     effectDialog = [...preferences._dialogs][0];
     findWidget(effectDialog, widget => widget instanceof Gtk.Entry).text = 'Native renamed effect';
     findWidget(effectDialog, widget => widget instanceof Gtk.Button && widget.label === 'Rename').emit('clicked');

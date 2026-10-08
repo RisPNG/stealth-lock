@@ -1,0 +1,109 @@
+name: checks
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: checks-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  checks:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: jdx/mise-action@c37c93293d6b742fc901e1406b8f764f6fb19dac
+        with:
+          version: 2026.10.4
+          install: false
+      - name: Install development dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends gjs gnome-shell libglib2.0-bin gir1.2-gtk-4.0 gir1.2-adw-1 libjavascriptcoregtk-6.0-1 gettext bubblewrap openssl gnupg zip unzip python3-venv
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          mise use --global node@24.21.0
+          mise exec -- npm ci
+          mise exec -- python3 -m venv "$RUNNER_TEMP/check-tools"
+          mise exec -- "$RUNNER_TEMP/check-tools/bin/python" -m pip install reuse==5.1.1 meson==1.3.2 ninja==1.11.1.3
+          echo "$RUNNER_TEMP/check-tools/bin" >> "$GITHUB_PATH"
+      - name: Install pinned GNOME GJS checks
+        env:
+          GJS_CI_TOOLS_REVISION: 1f758af5b8b3cfb677fbdbeed51148d39f23e365
+        run: |
+          mkdir "$RUNNER_TEMP/gjs-ci-tools"
+          curl --fail --location "https://gitlab.gnome.org/World/javascript/gjs-ci-tools/-/archive/$GJS_CI_TOOLS_REVISION/gjs-ci-tools-$GJS_CI_TOOLS_REVISION.tar.gz" -o "$RUNNER_TEMP/gjs-ci-tools.tar.gz"
+          echo "670d1d49c0e62c48a5846fc1077f550c453e3b12790dde7ee35c91f4a8861048  $RUNNER_TEMP/gjs-ci-tools.tar.gz" | sha256sum --check
+          tar -xzf "$RUNNER_TEMP/gjs-ci-tools.tar.gz" --strip-components=1 -C "$RUNNER_TEMP/gjs-ci-tools"
+          mise exec -- meson setup "$RUNNER_TEMP/gjs-ci-tools-build" "$RUNNER_TEMP/gjs-ci-tools" --prefix "$RUNNER_TEMP/gjs-ci-tools-install"
+          mise exec -- meson install -C "$RUNNER_TEMP/gjs-ci-tools-build"
+          echo "$RUNNER_TEMP/gjs-ci-tools-install/bin" >> "$GITHUB_PATH"
+      - name: Check new commit subjects
+        env:
+          COMMIT_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          mise exec -- python3 - <<'PY'
+          import os
+          import re
+          import subprocess
+          import sys
+
+          base = os.environ["COMMIT_BASE"]
+          if not base or set(base) == {"0"}:
+              sys.exit(0)
+          subjects = subprocess.check_output(["git", "log", "--no-merges", "--format=%s", f"{base}..HEAD"], text=True).splitlines()
+          invalid = [subject for subject in subjects if not subject or not re.match(r"^[a-z]", subject) or subject != subject.lower() or subject.endswith(".") or re.match(r"^[a-z]+(?:\([^)]*\))?!?: ", subject)]
+          for subject in invalid:
+              print(f"Invalid commit subject: {subject}", file=sys.stderr)
+          sys.exit(bool(invalid))
+          PY
+      - name: Run all source and isolated authentication checks
+        run: mise exec -- npm run check
+      - name: Clean development dependencies
+        if: always()
+        run: rm -rf node_modules "$RUNNER_TEMP/check-tools" "$RUNNER_TEMP/gjs-ci-tools" "$RUNNER_TEMP/gjs-ci-tools-build" "$RUNNER_TEMP/gjs-ci-tools-install" "$RUNNER_TEMP/gjs-ci-tools.tar.gz"
+
+  native:
+    needs: checks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        include:
+          - shell: 45
+            image: registry.gitlab.gnome.org/gnome/mutter/fedora/39@sha256:4b03855787ec1e93dba683727c45bb4c3866fa6f50483ebff8b57d5f90480222
+          - shell: 46
+            image: registry.gitlab.gnome.org/gnome/mutter/fedora/40@sha256:0e9c049a3f09817b519209148431bfb0bac8c64c41a0802806653579858b646a
+          - shell: 47
+            image: registry.gitlab.gnome.org/gnome/mutter/fedora/41@sha256:e618cc9725ed188e8411f22c90fd20783bc32a075798ce5cc0152792ded2efbc
+          - shell: 48
+            image: registry.gitlab.gnome.org/gnome/mutter/fedora/42@sha256:f38abfa7582a77aca3baab8cb95af22b611f395a2f089a0fad8b3b7015c07e81
+          - shell: 49
+            image: registry.gitlab.gnome.org/gnome/mutter/fedora/43@sha256:562ed214c807dae4f94178d6cb9497e526c106102edefe8ff7294d88e2847859
+          - shell: 50
+            image: registry.gitlab.gnome.org/gnome/mutter/fedora/44@sha256:d6af0e9dd27d32de34ef4a8025220499f90e0f0211ae0d4e8e1af076166c043b
+          - shell: 51
+            image: registry.gitlab.gnome.org/gnome/mutter/fedora/45@sha256:093cce1a3c819c27c075e347e195be91145197bff869ba7325f5c934fab3bf88
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: jdx/mise-action@c37c93293d6b742fc901e1406b8f764f6fb19dac
+        with:
+          version: 2026.10.4
+          install: false
+      - name: Test actual GNOME Shell runtime
+        env:
+          SHELL_VERSION: ${{ matrix.shell }}
+          SHELL_IMAGE: ${{ matrix.image }}
+        run: mise exec -- bash tests/shell/run-container.sh "$SHELL_VERSION" "$SHELL_IMAGE"

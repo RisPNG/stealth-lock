@@ -1,6 +1,7 @@
 import ctypes
 import importlib.util
 import pathlib
+import stat
 import subprocess
 import types
 import unittest
@@ -137,7 +138,7 @@ class AuthenticationTests(unittest.TestCase):
     def setUp(self):
         self.libc = FakeLibc()
 
-    def verify(self, pam, password="secret", unavailable=False):
+    def verify(self, pam, password="secret", unavailable=False, service="gdm-password", metadata=None, resolved=None, unknown_uid=False):
         def load_library(name):
             if name == "libpam.so.0":
                 if unavailable:
@@ -147,10 +148,17 @@ class AuthenticationTests(unittest.TestCase):
                 return pam.libc
             raise AssertionError(f"Unexpected library {name}")
 
-        with mock.patch.object(authentication.ctypes, "CDLL", side_effect=load_library) as loader, \
+        def trusted_metadata(path):
+            mode = stat.S_IFREG | 0o644 if str(path).startswith("/etc/pam.d/") else stat.S_IFDIR | 0o755
+            return types.SimpleNamespace(st_uid=0, st_mode=mode)
+
+        with mock.patch.object(authentication.pathlib.Path, "resolve", autospec=True, side_effect=resolved or (lambda path, **_options: path)), \
+                mock.patch.object(authentication.pathlib.Path, "lstat", autospec=True, side_effect=metadata or trusted_metadata), \
+                mock.patch.object(authentication.ctypes, "CDLL", side_effect=load_library) as loader, \
                 mock.patch.object(authentication.os, "getuid", return_value=1001), \
-                mock.patch.object(authentication.pwd, "getpwuid", return_value=types.SimpleNamespace(pw_name="uid-owner")) as user:
-            result = authentication.verify_password(password)
+                mock.patch.object(authentication.pwd, "getpwuid", side_effect=KeyError if unknown_uid else None,
+                                  return_value=types.SimpleNamespace(pw_name="uid-owner")) as user:
+            result = authentication.verify_password(password, service)
         self.assertFalse(pam.libc.allocations)
         return result, loader, user
 
@@ -292,21 +300,99 @@ class AuthenticationTests(unittest.TestCase):
         self.assertIn(authentication.PAM_CONV_ERR, pam.conversation_results)
 
     def test_unknown_uid_fails_before_loading_pam(self):
-        with mock.patch.object(authentication.pwd, "getpwuid", side_effect=KeyError), \
-                mock.patch.object(authentication.ctypes, "CDLL") as loader:
-            self.assertEqual(authentication.verify_password("secret"), "error")
-            loader.assert_not_called()
+        pam = FakePam(self.libc)
+        result, loader, user = self.verify(pam, unknown_uid=True)
+        self.assertEqual(result, "error")
+        loader.assert_not_called()
+        user.assert_called_once_with(1001)
+
+    def test_explicit_administrator_service_is_used_without_fallback(self):
+        pam = FakePam(self.libc)
+        self.assertEqual(self.verify(pam, service="custom-password")[0], "granted")
+        self.assertEqual(pam.calls[0], ("start", b"custom-password", b"uid-owner"))
+
+    def test_invalid_service_names_fail_before_loading_pam(self):
+        for service in (None, "", "../login", "/etc/pam.d/login", ".", "-login", "日本語", "x" * 65):
+            with self.subTest(service=service):
+                pam = FakePam(self.libc)
+                result, loader, user = self.verify(pam, service=service)
+                self.assertEqual(result, "error")
+                loader.assert_not_called()
+                user.assert_not_called()
+
+    def test_missing_service_is_not_replaced_by_another_pam_stack(self):
+        def missing(_path, **_options):
+            raise FileNotFoundError
+
+        pam = FakePam(self.libc)
+        result, loader, user = self.verify(pam, resolved=missing)
+        self.assertEqual(result, "error")
+        loader.assert_not_called()
+        user.assert_not_called()
+
+    def test_service_and_all_parent_paths_must_be_root_owned_and_not_group_or_world_writable(self):
+        for rejected_path, uid, mode in (
+            ("/etc/pam.d/gdm-password", 1001, stat.S_IFREG | 0o644),
+            ("/etc/pam.d/gdm-password", 0, stat.S_IFREG | 0o664),
+            ("/etc/pam.d/gdm-password", 0, stat.S_IFREG | 0o646),
+            ("/etc/pam.d/gdm-password", 0, stat.S_IFDIR | 0o755),
+            ("/etc/pam.d", 1001, stat.S_IFDIR | 0o755),
+            ("/etc/pam.d", 0, stat.S_IFDIR | 0o775),
+            ("/etc", 0, stat.S_IFDIR | 0o757),
+            ("/", 1001, stat.S_IFDIR | 0o755),
+        ):
+            with self.subTest(path=rejected_path, uid=uid, mode=mode):
+                def metadata(path):
+                    if str(path) == rejected_path:
+                        return types.SimpleNamespace(st_uid=uid, st_mode=mode)
+                    regular = str(path) == "/etc/pam.d/gdm-password"
+                    return types.SimpleNamespace(st_uid=0, st_mode=(stat.S_IFREG | 0o644) if regular else (stat.S_IFDIR | 0o755))
+
+                pam = FakePam(self.libc)
+                result, loader, user = self.verify(pam, metadata=metadata)
+                self.assertEqual(result, "error")
+                loader.assert_not_called()
+                user.assert_not_called()
+
+    def test_root_owned_symlinks_require_a_trusted_regular_target_and_trusted_target_parents(self):
+        target = pathlib.Path("/usr/share/pam-services/password")
+        for rejected in (None, "/etc/pam.d/gdm-password", str(target), "/usr/share/pam-services"):
+            with self.subTest(rejected=rejected):
+                def metadata(path):
+                    if str(path) == "/etc/pam.d/gdm-password":
+                        mode = stat.S_IFLNK | 0o777
+                    elif path == target:
+                        mode = stat.S_IFREG | 0o644
+                    else:
+                        mode = stat.S_IFDIR | 0o755
+                    return types.SimpleNamespace(st_uid=1001 if str(path) == rejected else 0, st_mode=mode)
+
+                pam = FakePam(self.libc)
+                result, loader, _user = self.verify(pam, metadata=metadata, resolved=lambda _path, **_options: target)
+                self.assertEqual(result, "granted" if rejected is None else "error")
+                if rejected is not None:
+                    loader.assert_not_called()
 
     def test_helper_rejects_malformed_stdin_without_output(self):
         for payload in (b"", b"secret\n", b"secret\r", b"secret\0tail", b"\xff", b"x" * 513, b"x" * 512 + b"\n", b"x" * 1048576):
             with self.subTest(payload=payload):
                 result = subprocess.run(
-                    ["/usr/bin/python3", "-I", "-B", str(ROOT / "helpers" / "authentication.py")],
+                    ["/usr/bin/python3", "-I", "-B", str(ROOT / "helpers" / "authentication.py"), "gdm-password"],
                     input=payload, capture_output=True, timeout=5, check=False,
                 )
                 self.assertEqual(result.returncode, 2)
                 self.assertEqual(result.stdout, b"")
                 self.assertEqual(result.stderr, b"")
+
+    def test_helper_requires_one_explicit_service_argument_without_output(self):
+        for arguments in ([], ["gdm-password", "login"], ["../login"], ["missing-stealth-lock-test-service"]):
+            result = subprocess.run(
+                ["/usr/bin/python3", "-I", "-B", str(ROOT / "helpers" / "authentication.py"), *arguments],
+                input=b"secret", capture_output=True, timeout=5, check=False,
+            )
+            self.assertEqual(result.returncode, 2)
+            self.assertEqual(result.stdout, b"")
+            self.assertEqual(result.stderr, b"")
 
 
 if __name__ == "__main__":

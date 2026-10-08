@@ -18,6 +18,7 @@ trap 'if [[ -d "$staging/previous" && ! -e "$extension_dir" ]]; then mv "$stagin
 bash "$script_dir/package.sh" "$staging/extension.zip" >/dev/null
 unzip -q "$staging/extension.zip" -d "$staging/extension"
 glib-compile-schemas --strict "$staging/extension/schemas"
+gjs -m "$staging/extension/shared/visual-process.js" "$staging/extension"
 gjs -m "$staging/extension/shared/presets.js" "$staging/extension/schemas"
 if [[ -e "$extension_dir" ]]; then
     mv "$extension_dir" "$staging/previous"

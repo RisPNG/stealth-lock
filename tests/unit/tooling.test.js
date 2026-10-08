@@ -26,12 +26,14 @@ function createExtensionFixture(t, {realPresets = false} = {}) {
         mkdirSync(dirname(join(source, file)), {recursive: true});
         copyFileSync(join(project, file), join(source, file));
     }
-    for (const file of ['extension.js', 'shell/lockSession.js', 'shell/authentication.js', 'shell/screenshot.js', 'shell/overlay.js', 'shell/integration.js', 'shell/media.js', 'shell/input.js', 'prefs.js', 'shared/presets.js', 'shell/effects/backdrop.js', 'shell/effects/city.js', 'helpers/authentication.py', 'stylesheet.css', 'styles/stylesheet-base.css', 'stylesheet-dark.css', 'stylesheet-light.css', 'README.md', 'REVIEW.md']) {
+    for (const file of ['extension.js', 'shell/lockSession.js', 'shell/authentication.js', 'shell/screenshot.js', 'shell/overlay.js', 'shell/integration.js', 'shell/media.js', 'shell/input.js', 'prefs.js', 'shared/presets.js', 'shared/starter-programs.js', 'shared/visual-api.js', 'shared/visual-frame.js', 'shared/visual-process.js', 'shared/runtime-state.js', 'shell/effects/renderer.js', 'helpers/authentication.py', 'helpers/visual-renderer.py', 'stylesheet.css', 'styles/stylesheet-base.css', 'stylesheet-dark.css', 'stylesheet-light.css', 'README.md', 'REVIEW.md']) {
         mkdirSync(dirname(join(source, file)), {recursive: true});
         writeFileSync(join(source, file), '');
     }
-    if (realPresets)
-        copyFileSync(join(project, 'shared/presets.js'), join(source, 'shared/presets.js'));
+    if (realPresets) {
+        for (const file of ['shared/presets.js', 'shared/starter-programs.js', 'shared/visual-api.js', 'shared/visual-process.js', 'helpers/visual-renderer.py'])
+            copyFileSync(join(project, file), join(source, file));
+    }
     writeFileSync(join(source, 'metadata.json'), JSON.stringify({uuid: 'stealth-lock@user', version: 1, name: 'Stealth Lock test', description: 'Isolated packaging fixture', 'shell-version': ['48'], 'settings-schema': 'org.gnome.shell.extensions.stealth-lock'}));
     writeFileSync(join(bin, 'gnome-extensions'), '#!/usr/bin/env bash\nif [[ "$1" == pack ]]; then exec /usr/bin/gnome-extensions "$@"; fi\nprintf "%s\\n" "$@" >> "$XDG_DATA_HOME/extension-calls"\n', {mode: 0o755});
     writeFileSync(join(bin, 'gjs'), '#!/usr/bin/env bash\nprintf "%s\\n" "$@" >> "$XDG_DATA_HOME/initializer-calls"\nexec /usr/bin/gjs "$@"\n', {mode: 0o755});
@@ -73,13 +75,19 @@ test('native packaging includes exactly the nonexecutable runtime payload withou
     execFileSync('bash', [join(source, 'package.sh'), archive], {env});
     const entries = execFileSync('unzip', ['-Z1', archive], {encoding: 'utf8'}).split('\n').filter(Boolean);
 
+    assert.equal(entries.filter(entry => !entry.endsWith('/')).length, 27);
     assert.ok(entries.includes('helpers/authentication.py'));
     assert.ok(entries.includes('shell/input.js'));
     assert.ok(entries.includes('shell/media.js'));
     assert.ok(entries.includes('shell/integration.js'));
-    assert.ok(entries.includes('shell/effects/backdrop.js'));
-    assert.ok(entries.includes('shell/effects/city.js'));
+    assert.ok(entries.includes('shell/effects/renderer.js'));
     assert.ok(entries.includes('shared/presets.js'));
+    assert.ok(entries.includes('shared/starter-programs.js'));
+    assert.ok(entries.includes('shared/visual-api.js'));
+    assert.ok(entries.includes('shared/visual-frame.js'));
+    assert.ok(entries.includes('shared/visual-process.js'));
+    assert.ok(entries.includes('shared/runtime-state.js'));
+    assert.ok(entries.includes('helpers/visual-renderer.py'));
     assert.ok(entries.includes('styles/stylesheet-base.css'));
     assert.ok(entries.includes('schemas/org.gnome.shell.extensions.stealth-lock.gschema.xml'));
     assert.ok(entries.includes('stylesheet-light.css'));
@@ -119,19 +127,23 @@ test('failed staging preserves the existing installation and cleans temporary fi
     assert.deepEqual(readdirSync(dirname(installed)), ['stealth-lock@user']);
 });
 
-test('initializer receives only the staged schema directory on installation and replacement', t => {
+test('installation checks the isolated renderer before initializing the staged schema on installation and replacement', t => {
     const {source, data, installed, env} = createExtensionFixture(t);
     execFileSync('bash', [join(source, 'install.sh')], {env});
     let arguments_ = readFileSync(join(data, 'initializer-calls'), 'utf8').trim().split('\n');
     assert.equal(arguments_[0], '-m');
-    assert.ok(arguments_[1].endsWith('/extension/shared/presets.js'));
-    assert.ok(arguments_[2].endsWith('/extension/schemas'));
-    assert.equal(arguments_.length, 3);
+    assert.ok(arguments_[1].endsWith('/extension/shared/visual-process.js'));
+    assert.ok(arguments_[2].endsWith('/extension'));
+    assert.equal(arguments_[3], '-m');
+    assert.ok(arguments_[4].endsWith('/extension/shared/presets.js'));
+    assert.ok(arguments_[5].endsWith('/extension/schemas'));
+    assert.equal(arguments_.length, 6);
     writeFileSync(join(data, 'initializer-calls'), '');
     execFileSync('bash', [join(source, 'install.sh')], {env});
     arguments_ = readFileSync(join(data, 'initializer-calls'), 'utf8').trim().split('\n');
-    assert.equal(arguments_.length, 3);
-    assert.ok(arguments_[2].endsWith('/extension/schemas'));
+    assert.equal(arguments_.length, 6);
+    assert.ok(arguments_[2].endsWith('/extension'));
+    assert.ok(arguments_[5].endsWith('/extension/schemas'));
     assert.ok(existsSync(join(installed, 'shared/presets.js')));
 });
 
@@ -141,11 +153,12 @@ test('the real installer seeds once and preserves edited and deleted presets thr
     execFileSync('bash', [join(source, 'install.sh')], {env});
     const initial = installedSettings(fixture);
     const entries = JSON.parse(initial['visual-effect-presets']);
-    assert.deepEqual(entries.map(entry => JSON.parse(entry.code).effect), ['blur', 'neo-rain', 'city-grow']);
+    assert.deepEqual(entries.map(entry => entry.name), ['Dim and Blur', 'Neo Rain', 'City Grow']);
+    assert.ok(entries.every(entry => entry.code.includes('ctx.event') && entry.code.includes('ctx.draw')));
     assert.equal(initial['visual-effect-active'], '');
     assert.equal(initial['visual-effect-initialized'], true);
 
-    entries[0] = {name: 'My Blur', code: '{"effect":"blur","knobs":{"radius":7}}'};
+    entries[0] = {name: 'My Blur', code: "if (ctx.event === 'destroy') return; ctx.blur(7, 1);"};
     entries.splice(1, 1);
     const retained = {
         'visual-effect-presets': JSON.stringify(entries), 'visual-effect-active': 'My Blur',
@@ -193,7 +206,7 @@ test('the real installer initializes starters alongside current preferences cust
 });
 
 test('the real installer preserves current libraries and selections configured before first initialization', async t => {
-    const custom = JSON.stringify([{name: 'My Rain', code: '{"effect":"neo-rain","knobs":{"density":0.2}}'}]);
+    const custom = JSON.stringify([{name: 'My Rain', code: "if (ctx.event === 'destroy') return; ctx.draw.text('user program', 20, 20);"}]);
     for (const [name, retained] of [
         ['custom library and selection', {'visual-effect-presets': custom, 'visual-effect-active': 'My Rain'}],
         ['deleted library', {'visual-effect-presets': '[]', 'visual-effect-active': ''}],
@@ -233,7 +246,7 @@ test('failed replacement restores the previous installation', t => {
     assert.deepEqual(readdirSync(dirname(installed)), ['stealth-lock@user']);
 });
 
-test('failed preset initialization preserves the previous installation before replacement', t => {
+test('failed renderer preflight preserves the previous installation before settings initialization', t => {
     const fixture = createExtensionFixture(t, {realPresets: true});
     const {source, bin, installed, env} = fixture;
     execFileSync('bash', [join(source, 'install.sh')], {env});
@@ -249,6 +262,40 @@ test('failed preset initialization preserves the previous installation before re
         assert.equal(current[key], value, key);
     assert.equal(current['visual-effect-initialized'], true);
     assert.deepEqual(readdirSync(dirname(installed)), ['stealth-lock@user']);
+});
+
+test('failed preset initialization preserves the previous installation after successful renderer preflight', t => {
+    const fixture = createExtensionFixture(t, {realPresets: true});
+    const {source, bin, installed, env} = fixture;
+    execFileSync('bash', [join(source, 'install.sh')], {env});
+    const retained = {'visual-effect-presets': '[]', 'visual-effect-active': ''};
+    installedSettings(fixture, retained);
+    writeFileSync(join(installed, 'previous.js'), 'previous installation');
+    writeFileSync(join(bin, 'gjs'), '#!/usr/bin/env bash\nif [[ "$2" == */shared/presets.js ]]; then exit 2; fi\nexec /usr/bin/gjs "$@"\n', {mode: 0o755});
+    const result = spawnSync('bash', [join(source, 'install.sh')], {env});
+    assert.notEqual(result.status, 0);
+    assert.equal(readFileSync(join(installed, 'previous.js'), 'utf8'), 'previous installation');
+    const current = installedSettings(fixture);
+    for (const [key, value] of Object.entries(retained))
+        assert.equal(current[key], value, key);
+    assert.deepEqual(readdirSync(dirname(installed)), ['stealth-lock@user']);
+});
+
+test('actual isolated renderer failure prevents first-profile preset writes and installation', t => {
+    const fixture = createExtensionFixture(t, {realPresets: true});
+    const {source, installed, env} = fixture;
+    execFileSync('glib-compile-schemas', ['--strict', join(source, 'schemas')], {env});
+    const before = installedSettings({...fixture, installed: source}, {'freeze-display': false});
+    assert.equal(before['visual-effect-initialized'], false);
+    writeFileSync(join(source, 'helpers/visual-renderer.py'), "raise RuntimeError('isolated dependency fixture unavailable')\n");
+    const result = spawnSync('bash', [join(source, 'install.sh')], {env});
+    assert.notEqual(result.status, 0);
+    assert.equal(existsSync(installed), false);
+    const after = installedSettings({...fixture, installed: source});
+    assert.equal(after['visual-effect-initialized'], false);
+    assert.equal(after['visual-effect-presets'], before['visual-effect-presets']);
+    assert.equal(after['freeze-display'], false);
+    assert.deepEqual(readdirSync(dirname(installed)), []);
 });
 
 test('uninstall retains settings by default and resets through local schema when requested', t => {

@@ -1,7 +1,9 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import {DEFAULT_EFFECT_PRESETS, initializeEffectPresets, readSavedEntries, validateEffectConfig} from '../../shared/presets.js';
+import vm from 'node:vm';
+
+import {DEFAULT_EFFECT_PRESETS, initializeEffectPresets, readSavedEntries, validateVisualProgramSource} from '../../shared/presets.js';
 
 function settingsFixture(values = {}, {refuseLibrary = false, refuseMarker = false} = {}) {
     const saved = new Map(Object.entries(values));
@@ -35,10 +37,8 @@ test('fresh profile seeds three ordinary inactive presets once, and deletion sur
     assert.equal(saved.get('visual-effect-initialized'), true);
     assert.equal(settings.get_string('visual-effect-active'), '');
     assert.equal(saved.has('visual-effect-active'), false);
-    for (const entry of readSavedEntries(settings, 'visual-effect-presets')) {
-        const config = validateEffectConfig(entry.code);
-        assert.equal(config.knobs.clock.visible, config.effect === 'city-grow');
-    }
+    for (const entry of readSavedEntries(settings, 'visual-effect-presets'))
+        assert.equal(validateVisualProgramSource(entry.code), entry.code);
     saved.set('visual-effect-presets', '[]');
     writes.length = 0;
     assert.equal(initializeEffectPresets(settings), true);
@@ -99,8 +99,8 @@ test('saved-entry validation rejects malformed CSS and effect libraries without 
             assert.deepEqual(writes, []);
         }
     }
-    const editable = settingsFixture({'visual-effect-presets': '[{"name":" Mine ","code":"invalid configuration draft"}]'});
-    assert.deepEqual(readSavedEntries(editable.settings, 'visual-effect-presets'), [{name: ' Mine ', code: 'invalid configuration draft'}]);
+    const editable = settingsFixture({'visual-effect-presets': '[{"name":" Mine ","code":"unfinished JavaScript draft"}]'});
+    assert.deepEqual(readSavedEntries(editable.settings, 'visual-effect-presets'), [{name: ' Mine ', code: 'unfinished JavaScript draft'}]);
 });
 
 test('saved CSS entries retain exact names and editable code through the shared reader', () => {
@@ -110,85 +110,169 @@ test('saved CSS entries retain exact names and editable code through the shared 
     assert.deepEqual(writes, []);
 });
 
-test('normalization fills effect and clock defaults without selecting or executing scripts', () => {
-    const blur = validateEffectConfig('{"effect":"blur"}');
-    assert.deepEqual(blur, {
-        effect: 'blur',
-        knobs: {
-            intervalMs: 50, background: null, foreground: null,
-            clock: {visible: false, format24h: true, seconds: true, date: true, align: 'center', topRatio: 0.14,
-                offsetY: 0, fontSize: 64, dateFontSize: 20, monitor: 'settings'},
-            radius: 20, brightness: 1,
-        },
-    });
-    assert.throws(() => validateEffectConfig('globalThis.presetExecuted = true'), /not valid JSON/);
+test('program admission checks UTF-8 source bounds without evaluating or rewriting it', () => {
+    const source = 'globalThis.presetExecuted = true;\nctx.draw.paint();';
+    assert.equal(validateVisualProgramSource(source), source);
     assert.equal(globalThis.presetExecuted, undefined);
+    for (const invalid of [null, {}, 1, '', ' \n\t ', 'ctx.draw.paint();\0'])
+        assert.throws(() => validateVisualProgramSource(invalid), /JavaScript text|NUL/);
+    for (const exact of ['x'.repeat(512 * 1024), '🔒'.repeat(128 * 1024)])
+        assert.equal(validateVisualProgramSource(exact), exact);
+    for (const oversized of ['x'.repeat(512 * 1024 + 1), '🔒'.repeat(128 * 1024 + 1)])
+        assert.throws(() => validateVisualProgramSource(oversized), /512 KiB/);
+    assert.equal(validateVisualProgramSource('const unfinished ='), 'const unfinished =');
 });
 
-test('top-level shape, effect names, knobs and unknown keys are checked strictly', () => {
-    for (const config of [null, [], true, {}, {effect: ['blur']}, {effect: 'clock'}, {effect: '__proto__'},
-        {effect: 'blur', script: 'x'}, {effect: 'blur', knobs: null}, {effect: 'blur', knobs: []},
-        {effect: 'blur', knobs: {fontSize: 10}}, {effect: 'neo-rain', knobs: {radius: 2}}])
-        assert.throws(() => validateEffectConfig(JSON.stringify(config)));
-    assert.throws(() => validateEffectConfig({effect: 'blur'}), /JSON text/);
-    assert.throws(() => validateEffectConfig('{"effect":"blur","knobs":{"__proto__":{}}}'), /Unknown/);
-});
-
-test('numeric configuration rejects invalid bounds and fractions where integers are required', () => {
-    const invalid = {
-        blur: [{intervalMs: 32}, {intervalMs: 1001}, {intervalMs: 33.5}, {radius: -1}, {radius: 101}, {brightness: 1.01}, {brightness: '0.5'}],
-        'neo-rain': [{fontSize: 7}, {fontSize: 16.5}, {density: -0.1}, {maxDrops: 9}, {speedMin: 0.04},
-            {speedMax: 3.01}, {lengthMin: 0}, {lengthMax: 101}, {lengthMin: 1.5}, {fadeAlpha: 0},
-            {speedMin: 2, speedMax: 1}, {lengthMin: 50, lengthMax: 40}],
-        'city-grow': [{scale: 17}, {startBranches: 0}, {lineWidth: 0.24}, {fillAlpha: 1.1},
-            {reversePoints: 513}, {restartDelayMs: -1}, {branchSpeedMultiplier: 0.09}, {scale: 1.5}],
+function createProgramFixture(name, {width = 1920, height = 1080, reducedMotion = false, random} = {}) {
+    const entry = DEFAULT_EFFECT_PRESETS.find(preset => preset.name === name);
+    const commands = [];
+    const clockChanges = [];
+    const blurChanges = [];
+    let seed = 1234567;
+    const math = Object.create(Math);
+    math.random = random ?? (() => {
+        seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;
+        return seed / 4294967296;
+    });
+    const colors = {
+        blur: [0.02, 0.02, 0.02, 0.25], background: [0.02, 0.02, 0.02, 0],
+        foreground: [0.1, 0.9, 0.3, 1], head: [0.7, 1, 0.7, 1], glitch: [0.6, 1, 0.6, 1],
+        palette: [[0.2, 0.9, 1, 0.7], [1, 0.3, 0.1, 1]],
     };
-    for (const [effect, cases] of Object.entries(invalid)) {
-        for (const knobs of cases)
-            assert.throws(() => validateEffectConfig(JSON.stringify({effect, knobs})));
+    const methods = ['setSourceRGBA', 'paint', 'rectangle', 'fill', 'moveTo', 'lineTo', 'stroke',
+        'setLineWidth', 'setOperator', 'save', 'restore', 'text'];
+    const ctx = {
+        event: 'init', state: {}, width, height, reducedMotion, colors,
+        now: 0, delta: 50, monitors: [{x: 0, y: 0, width, height}],
+        draw: Object.fromEntries(methods.map(method => [method, (...values) => {
+            commands.push([method, ...values]);
+            assert.ok(commands.length <= 2048, `${name} exceeded the frame command budget`);
+        }])),
+        clock: options => clockChanges.push(options),
+        blur: (...options) => blurChanges.push(options),
+    };
+    const context = vm.createContext({ctx, Math: math});
+    const program = new vm.Script('(function (ctx) {\n' + entry.code + '\n})(ctx)', {filename: name + '.js'});
+    return {
+        entry, ctx, commands, clockChanges, blurChanges,
+        run(event) {
+            commands.length = 0;
+            ctx.event = event;
+            ctx.now += ctx.delta;
+            program.runInContext(context, {timeout: 1000});
+            assert.ok(Buffer.byteLength(JSON.stringify(commands)) <= 256 * 1024, `${name} exceeded the frame byte budget`);
+            return commands;
+        },
+    };
+}
+
+test('each starter is a self-contained editable lifecycle program using the ordinary visual API', () => {
+    assert.deepEqual(DEFAULT_EFFECT_PRESETS.map(entry => entry.name), ['Dim and Blur', 'Neo Rain', 'City Grow']);
+    for (const {name, code} of DEFAULT_EFFECT_PRESETS) {
+        assert.throws(() => JSON.parse(code));
+        assert.equal(/\b(?:import|Gio|GLib|Cairo|Pango|Shell|St)\b/u.test(code), false);
+        const fixture = createProgramFixture(name);
+        assert.ok(fixture.run('init').length > 0, `${name} must render a first frame`);
+        fixture.run('update');
+        fixture.run('destroy');
+        assert.equal(fixture.ctx.state.scene, undefined);
     }
-    assert.equal(validateEffectConfig('{"effect":"blur","knobs":{"radius":0.5,"brightness":0,"intervalMs":33}}').knobs.radius, 0.5);
-    assert.equal(validateEffectConfig('{"effect":"city-grow","knobs":{"lineWidth":0.25,"restartDelayMs":30000}}').knobs.restartDelayMs, 30000);
-    assert.throws(() => validateEffectConfig('{"effect":"blur","knobs":{"radius":1e400}}'), /radius/);
 });
 
-test('color palettes use typed byte RGBA arrays and permit theme defaults', () => {
-    const knobs = {background: [0, 128, 255, 0], foreground: [255, 0, 64, 255], palette: [[0, 0, 0, 255]]};
-    assert.deepEqual(validateEffectConfig(JSON.stringify({effect: 'city-grow', knobs})).knobs.palette, knobs.palette);
-    for (const value of ['red', [0, 0, 0], [0, 0, 0, 256], [0, 0, 0, -1], [0, 0, 0, 1.5], [true, 0, 0, 255]])
-        assert.throws(() => validateEffectConfig(JSON.stringify({effect: 'blur', knobs: {foreground: value}})));
-    for (const palette of [[], [[0, 0, 0, 255], [1, 2, 3]], Array(17).fill([0, 0, 0, 255]), 'red'])
-        assert.throws(() => validateEffectConfig(JSON.stringify({effect: 'city-grow', knobs: {palette}})));
-    assert.equal(validateEffectConfig('{"effect":"city-grow","knobs":{"palette":null}}').knobs.palette, null);
+test('blur uses theme dimming and disposes its ordinary declaration on destruction', () => {
+    const fixture = createProgramFixture('Dim and Blur');
+    fixture.run('init');
+    assert.deepEqual(fixture.blurChanges, [[20, 1]]);
+    assert.deepEqual(fixture.commands, [['setOperator', 'source'], ['setSourceRGBA', ...fixture.ctx.colors.blur], ['paint']]);
+    fixture.run('destroy');
+    assert.deepEqual(fixture.blurChanges.at(-1), [null]);
 });
 
-test('rain text uses Unicode codepoint limits and flags remain booleans', () => {
-    const defaultCharacters = validateEffectConfig('{"effect":"neo-rain"}').knobs.characters;
-    assert.equal(defaultCharacters.length, 66);
-    assert.equal(defaultCharacters.codePointAt(0), 0xff66);
-    assert.equal(defaultCharacters.codePointAt(55), 0xff9d);
-    assert.equal(defaultCharacters.slice(56), '0123456789');
-    assert.ok([...defaultCharacters.slice(0, 56)].every((character, index) => character.codePointAt(0) === 0xff66 + index));
-    const rain = validateEffectConfig(JSON.stringify({effect: 'neo-rain', knobs: {characters: '🔒'.repeat(256), fontFamily: 'monospace'}}));
-    assert.equal([...rain.knobs.characters].length, 256);
-    for (const characters of ['', 'x\n', 'x\r', 'x\0', '\ud800', '\udfff', '🔒'.repeat(257), 5])
-        assert.throws(() => validateEffectConfig(JSON.stringify({effect: 'neo-rain', knobs: {characters}})));
-    for (const fontFamily of ['', ' ', 'x\n', 'x\r', 'x\0', '\ud800', '\udfff', 'x'.repeat(129), 5])
-        assert.throws(() => validateEffectConfig(JSON.stringify({effect: 'neo-rain', knobs: {fontFamily}})));
-    assert.equal(validateEffectConfig('{"effect":"neo-rain","knobs":{"fontFamily":"🔒 Font"}}').knobs.fontFamily, '🔒 Font');
-    for (const knobs of [{fillBlocks: 1}, {reverse: 'true'}])
-        assert.throws(() => validateEffectConfig(JSON.stringify({effect: 'city-grow', knobs})));
+test('rain draws the editable Unicode alphabet and preserves transparent pixels below glyphs', () => {
+    const fixture = createProgramFixture('Neo Rain');
+    fixture.run('init');
+    const alphabet = fixture.ctx.state.scene.characters;
+    assert.equal(alphabet.length, 66);
+    assert.equal(alphabet[0].codePointAt(0), 0xff66);
+    assert.equal(alphabet[55].codePointAt(0), 0xff9d);
+    assert.equal(alphabet.slice(56).join(''), '0123456789');
+    assert.ok(fixture.commands.some(command => command[0] === 'text'));
+    assert.ok(fixture.commands.filter(command => command[0] === 'text').every(command => alphabet.includes(command[1])));
+    fixture.run('update');
+    assert.equal(fixture.commands[0][1], 'dest-out');
+    assert.ok(fixture.commands.some(command => command[0] === 'setOperator' && command[1] === 'source'));
+    assert.equal(fixture.commands.findLast(command => command[0] === 'setOperator')[1], 'over');
 });
 
-test('clock normalization validates every positioning, format and monitor field', () => {
-    const clock = {visible: true, format24h: false, seconds: false, date: false, align: 'right', topRatio: 1,
-        offsetY: -2147483648, fontSize: 160, dateFontSize: 64, monitor: '12'};
-    assert.deepEqual(validateEffectConfig(JSON.stringify({effect: 'blur', knobs: {clock}})).knobs.clock, clock);
-    for (const invalid of [null, [], {visible: 1}, {format24h: 'false'}, {seconds: null}, {date: 0}, {align: 'middle'},
-        {topRatio: -0.01}, {topRatio: 1.01}, {offsetY: 2147483648}, {offsetY: 0.5}, {fontSize: 7},
-        {dateFontSize: 65}, {monitor: 0}, {monitor: '-1'}, {monitor: 'primary'}, {extra: true}])
-        assert.throws(() => validateEffectConfig(JSON.stringify({effect: 'blur', knobs: {clock: invalid}})));
-    for (const monitor of ['settings', 'all', '0'])
-        assert.equal(validateEffectConfig(JSON.stringify({effect: 'blur', knobs: {clock: {monitor}}})).knobs.clock.monitor, monitor);
-    assert.equal(validateEffectConfig('{"effect":"neo-rain","knobs":{"clock":{"visible":true}}}').knobs.clock.fontSize, 64);
+test('reduced motion renders visible rain and city first frames and keeps subsequent frames static', () => {
+    for (const name of ['Neo Rain', 'City Grow']) {
+        const fixture = createProgramFixture(name, {reducedMotion: true});
+        fixture.run('init');
+        assert.ok(fixture.commands.some(command => ['text', 'stroke'].includes(command[0])), `${name} must have visible decoration`);
+        const scene = fixture.ctx.state.scene;
+        fixture.run('update');
+        assert.deepEqual(fixture.commands, []);
+        assert.equal(fixture.ctx.state.scene, scene);
+        fixture.run('destroy');
+        assert.equal(fixture.ctx.state.scene, undefined);
+    }
+});
+
+test('City Grow retains branching, reverses its recorded drawing, and restarts with its native clock declaration', () => {
+    const fixture = createProgramFixture('City Grow', {width: 120, height: 96});
+    fixture.run('init');
+    assert.equal(fixture.clockChanges[0].visible, true);
+    assert.equal(fixture.clockChanges[0].monitor, 'settings');
+    const scene = fixture.ctx.state.scene;
+    assert.ok(scene.historyLength > 0);
+    let reversed = false;
+    let restarted = false;
+    for (let frame = 0; frame < 3000; frame++) {
+        fixture.run('update');
+        if (scene.reverseRunning)
+            reversed = true;
+        if (reversed && !scene.reverseRunning && scene.restartAtMs === null) {
+            restarted = true;
+            break;
+        }
+    }
+    assert.equal(reversed, true);
+    assert.equal(restarted, true);
+    assert.ok(scene.cells.some(cell => cell === 1));
+    fixture.run('destroy');
+    assert.equal(fixture.clockChanges.at(-1), null);
+});
+
+test('starter programs remain within frame and retained-state limits on large desktops', () => {
+    for (const name of ['Neo Rain', 'City Grow']) {
+        const fixture = createProgramFixture(name, {width: 32768, height: 16384, reducedMotion: true});
+        fixture.run('init');
+        const scene = fixture.ctx.state.scene;
+        if (name === 'City Grow') {
+            assert.ok(scene.cells.length <= 262144);
+            assert.ok(scene.branchList.length <= 24);
+        } else {
+            assert.ok(scene.columns.length <= 512);
+        }
+        fixture.ctx.reducedMotion = false;
+        for (let frame = 0; frame < 400; frame++) {
+            fixture.run('update');
+            if (name === 'City Grow') {
+                assert.ok(scene.branchList.length <= 24);
+                assert.ok(scene.historyLength <= 20000 + 128 * 3);
+            }
+        }
+        fixture.run('destroy');
+    }
+});
+
+test('users edit or remove starter algorithms without initialization replacing their changes', () => {
+    const fixture = settingsFixture();
+    initializeEffectPresets(fixture.settings);
+    const edited = [{name: 'My pattern', code: DEFAULT_EFFECT_PRESETS[1].code.replace('fontSize: 16', 'fontSize: 24')}];
+    fixture.saved.set('visual-effect-presets', JSON.stringify(edited));
+    fixture.writes.length = 0;
+    assert.equal(initializeEffectPresets(fixture.settings), true);
+    assert.deepEqual(readSavedEntries(fixture.settings, 'visual-effect-presets'), edited);
+    assert.deepEqual(fixture.writes, []);
 });

@@ -11,6 +11,8 @@ mise exec -- npm run lint
 mise exec -- npm test
 PYTHONDONTWRITEBYTECODE=1 mise exec -- python3 -m unittest discover -s tests/auth -p 'test_*.py'
 mise exec -- npm run test:auth
+PYTHONDONTWRITEBYTECODE=1 mise exec -- python3 -m unittest discover -s tests/visual -p 'test_*.py'
+mise exec -- gjs -m tests/visual/process.js
 
 for script in package.sh install.sh uninstall.sh scripts/*.sh tests/shell/*.sh; do
     bash -n "$script"

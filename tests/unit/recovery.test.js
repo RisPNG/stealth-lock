@@ -3,13 +3,14 @@ import test from 'node:test';
 
 import {loadModule} from './harness.js';
 
-async function extensionRuntime({wasLocked = false, nativeLocked = false, debugMode = false, deferRestore = false} = {}) {
+async function extensionRuntime({wasLocked = false, nativeLocked = false, debugMode = false, deferRestore = false, systemAuth = false, systemAvailable = false, systemThrows = false} = {}) {
     const state = new Map(wasLocked ? [['stealth-lock@user.locked', true]] : []);
     const events = [];
     let nativeChange;
     let pendingRestore;
     const settings = {
         get_boolean: key => key === 'debug-mode' && debugMode,
+        get_string: () => systemAuth ? 'system' : 'password',
         get_strv: key => [key === 'lock-hotkey' ? '<Super><Control>l' : '<Control><Alt><Shift>u'],
         connectObject: () => {},
         disconnectObject: () => events.push('settings-disconnect'),
@@ -48,6 +49,7 @@ async function extensionRuntime({wasLocked = false, nativeLocked = false, debugM
         }
     }
     const Main = {
+        notifyError: (...args) => events.push(['notify-error', ...args]),
         wm: {
             addKeybinding: name => {
                 events.push(['add', name]);
@@ -66,9 +68,15 @@ async function extensionRuntime({wasLocked = false, nativeLocked = false, debugM
         'gi://Shell': {default: {ActionMode: {NORMAL: 1, OVERVIEW: 2, NONE: 0}}},
         'resource:///org/gnome/shell/ui/main.js': Main,
         'resource:///org/gnome/shell/extensions/extension.js': {Extension},
-        './shell/lockSession.js': {LockSession, LOCKED_STATE: 'stealth-lock@user.locked'},
+        './shell/lockSession.js': {LockSession},
+        './shared/runtime-state.js': {LOCKED_STATE: 'stealth-lock@user.locked'},
         './shared/presets.js': {initializeEffectPresets: () => {}},
-        './shell/integration.js': {restoreWhenShellReady: callback => {
+        './shell/integration.js': {handoffToSystemLock: () => {
+            events.push('system-lock-request');
+            if (systemThrows)
+                throw new Error('ScreenShield fixture failure');
+            return systemAvailable;
+        }, restoreWhenShellReady: callback => {
             if (deferRestore)
                 pendingRestore = callback;
             else
@@ -78,7 +86,7 @@ async function extensionRuntime({wasLocked = false, nativeLocked = false, debugM
             nativeChange = callback;
             return () => events.push('lock-watch-disconnect');
         }},
-    }, {global});
+    }, {global, console: {error: message => events.push(message)}});
     const extension = new module.default();
     return {extension, events, state, nativeChange: locked => nativeChange(locked), restore: () => pendingRestore?.()};
 }
@@ -275,4 +283,30 @@ test('native shield watch ignores intermediate unlocking and releases both conne
     assert.deepEqual(states, [true, false]);
     release();
     assert.deepEqual(removed, ['active-changed', 'locked-changed']);
+});
+
+
+test('system authentication uses the native lock without constructing a password session', async t => {
+    for (const systemAvailable of [true, false]) {
+        await t.test(systemAvailable ? 'native lock available' : 'native lock unavailable', async () => {
+            const state = await extensionRuntime({systemAuth: true, systemAvailable});
+            state.extension.enable();
+            state.extension.lock();
+            assert.ok(state.events.includes('system-lock-request'));
+            assert.ok(!state.events.includes('start'));
+            assert.equal(state.extension._session, null);
+            assert.equal(state.events.some(event => Array.isArray(event) && event[0] === 'notify-error'), !systemAvailable);
+            state.extension.disable();
+        });
+    }
+});
+
+test('a native system-lock exception during recovery reports failure without disabling the extension', async () => {
+    const state = await extensionRuntime({wasLocked: true, systemAuth: true, systemThrows: true});
+    state.extension.enable();
+    assert.ok(state.events.includes('system-lock-request'));
+    assert.ok(state.events.some(event => Array.isArray(event) && event[0] === 'notify-error'));
+    assert.ok(!state.events.includes('settings-disconnect'));
+    assert.equal(state.state.get('stealth-lock@user.locked'), true);
+    state.extension.disable();
 });
