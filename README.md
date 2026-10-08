@@ -27,7 +27,7 @@ Then log out and back in, and enable `stealth-lock@user` in Extensions. The inst
 <details>
 <summary>Tools needed for source installation</summary>
 
-The commands use mise. Installation also needs Bash, `gnome-extensions`, GJS, GLib schema tools, unzip, `/usr/bin/python3`, Bubblewrap (`/usr/bin/bwrap`) and JavaScriptCoreGTK 6 (`libjavascriptcoregtk-6.0.so.1`). Unprivileged namespaces must be available for the isolated visual worker; the installer checks this before changing settings or replacing installed files. Node and npm are only needed for development checks.
+The commands use mise. Installation also needs Bash, `gnome-extensions`, GJS, GTK 4 and libadwaita 1.4 or later with their introspection bindings, GLib schema tools, unzip, `/usr/bin/python3`, Bubblewrap 0.8.0 or later (`/usr/bin/bwrap`) and JavaScriptCoreGTK 6 (`libjavascriptcoregtk-6.0.so.1`). Unprivileged user namespaces must be available for the isolated visual worker; the installer checks this before changing settings or replacing installed files. Node and npm are only needed for development checks.
 
 The extension is installed in `$XDG_DATA_HOME/gnome-shell/extensions/stealth-lock@user`, or `~/.local/share/gnome-shell/extensions/stealth-lock@user` when `XDG_DATA_HOME` is unset.
 

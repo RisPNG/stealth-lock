@@ -54,12 +54,17 @@ payload=(
     LICENSES/GPL-3.0-only.txt
 )
 
-extras=()
+extras=("--extra-source=$staging/schemas")
 declare -A extra_paths=()
 for file in "${payload[@]}"; do
-    mkdir -p "$staging/payload/$(dirname "$file")"
-    cp "$script_dir/$file" "$staging/payload/$file"
-    chmod 0644 "$staging/payload/$file"
+    if [[ "$file" == schemas/* ]]; then
+        payload_path="$staging/$file"
+    else
+        payload_path="$staging/payload/$file"
+    fi
+    mkdir -p "$(dirname "$payload_path")"
+    cp "$script_dir/$file" "$payload_path"
+    chmod 0644 "$payload_path"
     case "$file" in
         extension.js|prefs.js|metadata.json|stylesheet.css|schemas/*) ;;
         *)
@@ -72,7 +77,7 @@ for file in "${payload[@]}"; do
     esac
 done
 
-glib-compile-schemas --strict --dry-run "$staging/payload/schemas"
+glib-compile-schemas --strict --dry-run "$staging/schemas"
 gnome-extensions pack --force --out-dir="$staging" "${extras[@]}" "$staging/payload"
 /usr/bin/python3 - "$staging/$extension_uuid.shell-extension.zip" "${payload[@]}" <<'PY'
 import stat

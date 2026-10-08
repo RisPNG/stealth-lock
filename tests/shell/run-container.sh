@@ -34,13 +34,32 @@ docker cp "$staging/project/." "$identifier:/project"
 docker cp "$(command -v mise)" "$identifier:/usr/local/bin/mise"
 docker exec "$identifier" chown -R 1000:1000 /project
 docker exec "$identifier" bash -eu -c '
+    getent passwd slh-ci
+    id slh-ci
+    test "$(id -u slh-ci)" = 1000
+    if getent shadow slh-ci >/dev/null; then
+        echo "Fixture shadow entry is readable"
+    else
+        echo "Fixture shadow entry is unavailable" >&2
+    fi
+    stat --format="%n mode=%a owner=%u:%g" /etc/shadow /etc/gshadow /usr/sbin/unix_chkpwd
+    if /usr/sbin/unix_chkpwd slh-ci chkexpiry </dev/null; then
+        echo "Fixture account expiry helper passed"
+    else
+        echo "Fixture account expiry helper failed: $?" >&2
+    fi
+    sed -n -E "/^(Name|Uid|Gid|Cap(Inh|Prm|Eff|Bnd|Amb)|NoNewPrivs):/p" /proc/1/status
+    systemctl show user@1000.service --property=User --property=PAMName \
+        --property=CapabilityBoundingSet --property=NoNewPrivileges --property=RestrictSUIDSGID
+    systemctl cat user@1000.service | head -n 80
     for attempt in $(seq 1 60); do
         if systemctl is-active --quiet user@1000.service && test -S /run/user/1000/bus; then
             exit 0
         fi
         sleep 1
     done
-    systemctl status user@1000.service
+    systemctl status user@1000.service || true
+    journalctl --unit=user@1000.service --lines=60 --no-pager
     exit 1
 '
 docker exec --user 1000 --workdir /project \

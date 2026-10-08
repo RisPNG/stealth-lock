@@ -102,6 +102,37 @@ test('native packaging includes exactly the nonexecutable runtime payload withou
     assert.equal(execFileSync('unzip', ['-Z1', archive], {encoding: 'utf8'}).includes('AGENTS.md'), false);
 });
 
+test('native packaging retains raw schemas when the installed GNOME tool auto-compiles default schema directories', t => {
+    const {source, data, bin, env} = createExtensionFixture(t);
+    writeFileSync(join(bin, 'gnome-extensions'), `#!/usr/bin/python3
+import json, os, pathlib, subprocess, sys, zipfile
+arguments = sys.argv[1:]
+subprocess.run(["/usr/bin/gnome-extensions", *arguments], check=True)
+source = pathlib.Path(arguments[-1])
+schemas = source / "schemas"
+if schemas.is_dir():
+    subprocess.run(["glib-compile-schemas", "--strict", str(schemas)], check=True)
+    output = pathlib.Path(next(argument.split("=", 1)[1] for argument in arguments if argument.startswith("--out-dir=")))
+    uuid = json.loads((source / "metadata.json").read_text())["uuid"]
+    with zipfile.ZipFile(output / (uuid + ".shell-extension.zip"), "a") as archive:
+        archive.write(schemas / "gschemas.compiled", "schemas/gschemas.compiled")
+pathlib.Path(os.environ["XDG_DATA_HOME"], "pack-details.json").write_text(json.dumps({
+    "automaticSchemasCompiled": schemas.is_dir(),
+    "extraSources": [argument.split("=", 1)[1] for argument in arguments if argument.startswith("--extra-source=")],
+}))
+`, {mode: 0o755});
+    const archive = join(data, 'extension.zip');
+    execFileSync('bash', [join(source, 'package.sh'), archive], {env});
+    const entries = execFileSync('unzip', ['-Z1', archive], {encoding: 'utf8'}).trim().split('\n');
+    assert.ok(entries.includes('schemas/org.gnome.shell.extensions.stealth-lock.gschema.xml'));
+    assert.equal(entries.includes('schemas/gschemas.compiled'), false);
+    assert.equal(entries.filter(entry => !entry.endsWith('/')).length, 27);
+    assert.equal(existsSync(join(source, 'schemas/gschemas.compiled')), false);
+    const details = JSON.parse(readFileSync(join(data, 'pack-details.json'), 'utf8'));
+    assert.equal(details.automaticSchemasCompiled, false);
+    assert.ok(details.extraSources.some(path => path.startsWith('/') && path.endsWith('/schemas')));
+});
+
 test('installation replaces stale files only inside user-local destination', t => {
     const {source, data, installed, env} = createExtensionFixture(t);
     mkdirSync(installed, {recursive: true});
