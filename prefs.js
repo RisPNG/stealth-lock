@@ -376,7 +376,7 @@ export default class StealthLockPreferences extends ExtensionPreferences {
             dialog.destroy();
         });
         dialog.connect('realize', () => dialog.get_surface().inhibit_system_shortcuts(null));
-        dialog.present();
+        dialog.set_visible(true);
     }
 
     _showSavedEntryEditor(window, settings, key, title, description) {
@@ -621,6 +621,6 @@ export default class StealthLockPreferences extends ExtensionPreferences {
             dialog.destroy();
         });
         buffer.set_text(isEffect ? initialEntry?.code ?? 'if (ctx.event === "destroy") return;\nctx.draw.setSourceRGBA(...ctx.colors.foreground);\nctx.draw.rectangle(20, 20, 120, 80);\nctx.draw.fill();' : settings.get_string(key), -1);
-        dialog.present();
+        dialog.set_visible(true);
     }
 }

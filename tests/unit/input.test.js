@@ -21,19 +21,27 @@ async function runtime({stealth = false, attached = true, revealTimeoutSeconds =
         KEY_Super_L: 1001, KEY_Super_R: 1002, KEY_Meta_L: 1003, KEY_Meta_R: 1004,
     };
     let actor;
+    const nativeFocus = {
+        reset() {
+            events.push('native-input-reset');
+            if (actor.preedit) {
+                actor.text += actor.preedit;
+                actor.preedit = '';
+                events.push('native-composition-reset');
+            }
+        },
+    };
     const stage = {
         focus: null,
         get_key_focus() { return this.focus; },
         get_event_actor(event) { return event.get_source(); },
         set_key_focus(focus) {
+            if (this.focus === focus)
+                return;
             events.push(['focus', focus]);
             if (actor && this.focus && (this.focus === actor || actor.contains(this.focus))) {
                 events.push('native-focus-out');
-                if (actor.preedit) {
-                    actor.text += actor.preedit;
-                    actor.preedit = '';
-                    events.push('native-composition-reset');
-                }
+                nativeFocus.reset();
             }
             this.focus = focus;
         },
@@ -48,6 +56,10 @@ async function runtime({stealth = false, attached = true, revealTimeoutSeconds =
             this.destroyed = false;
             this.clutter_text = {
                 set_max_length: length => { this.maximumCharacters = length; },
+                grab_key_focus: () => {
+                    events.push(['refocus', this.text, this.password_visible]);
+                    stage.set_key_focus(this.clutter_text);
+                },
                 connectObject: (...arguments_) => {
                     assert.equal(arguments_.at(-1), this);
                     for (let i = 0; i < arguments_.length - 1; i += 2)
@@ -89,8 +101,8 @@ async function runtime({stealth = false, attached = true, revealTimeoutSeconds =
         get_secondary_icon() { return this.properties.show_peek_icon ? peek : null; }
         contains(other) { return other === this.clutter_text; }
         grab_key_focus() {
-            events.push(['refocus', this.text, this.password_visible]);
-            stage.set_key_focus(this.clutter_text);
+            stage.set_key_focus(this);
+            this.clutter_text.grab_key_focus();
         }
         destroy() {
             events.push('actor-destroy');
@@ -100,6 +112,9 @@ async function runtime({stealth = false, attached = true, revealTimeoutSeconds =
         }
     }
     const {PasswordInput} = await loadModule('shell/input.js', {
+        'resource:///org/gnome/shell/ui/main.js': {inputMethod: {
+            get currentFocus() { return stage.focus && (stage.focus === actor || actor.contains(stage.focus)) ? nativeFocus : null; },
+        }},
         'gi://Clutter': {default: Clutter},
         'gi://GLib': {default: {
             PRIORITY_DEFAULT: 0, SOURCE_REMOVE: false,
@@ -153,7 +168,7 @@ test('native activation and text changes call the supplied session callbacks', a
     assert.deepEqual(events, [['text', 'päss🔐'], 'activity', 'submit']);
 });
 
-test('discard clears a synchronous focus-out composition commit before restoring owned focus', async t => {
+test('discard resets native composition before clearing text and preserves owned focus', async t => {
     for (const focusTarget of ['entry', 'text']) {
         await t.test(focusTarget, async () => {
             const {input, actor, stage, events} = await runtime();
@@ -161,21 +176,35 @@ test('discard clears a synchronous focus-out composition commit before restoring
             actor.preedit = 'pending';
             actor.password_visible = true;
             stage.focus = focusTarget === 'entry' ? actor : actor.clutter_text;
+            const originalFocus = stage.focus;
             events.length = 0;
             input.discardPassword();
             assert.equal(actor.text, '');
             assert.equal(actor.preedit, '');
             assert.equal(actor.password_visible, false);
-            assert.equal(stage.focus, actor.clutter_text);
+            assert.equal(stage.focus, originalFocus);
             const resetIndex = events.indexOf('native-composition-reset');
             const clearIndex = events.findIndex(event => Array.isArray(event) && event[0] === 'text' && event[1] === '');
-            const refocusIndex = events.findIndex(event => Array.isArray(event) && event[0] === 'refocus');
             assert.ok(resetIndex >= 0 && resetIndex < clearIndex);
-            assert.ok(clearIndex < refocusIndex);
-            assert.deepEqual(events[refocusIndex], ['refocus', '', false]);
-            assert.ok(events.lastIndexOf('activity') < refocusIndex);
+            assert.equal(events.filter(event => event === 'native-input-reset').length, 1);
+            assert.equal(events.includes('native-focus-out'), false);
+            assert.equal(events.some(event => Array.isArray(event) && ['focus', 'refocus'].includes(event[0])), false);
         });
     }
+});
+
+test('ordinary keys preserve active composition and native text focus', async () => {
+    const {input, actor, stage, events, key, Clutter} = await runtime();
+    actor.text = 'committed';
+    actor.preedit = 'pending';
+    stage.focus = actor.clutter_text;
+    events.length = 0;
+    assert.equal(input.handleEvent(key(97)), Clutter.EVENT_PROPAGATE);
+    assert.equal(actor.text, 'committed');
+    assert.equal(actor.preedit, 'pending');
+    assert.equal(stage.focus, actor.clutter_text);
+    assert.equal(events.includes('native-input-reset'), false);
+    assert.equal(events.includes('native-focus-out'), false);
 });
 
 test('taking a password returns only committed text and discards pending composition', async () => {

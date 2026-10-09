@@ -1,6 +1,7 @@
 import Clutter from 'gi://Clutter';
 import GLib from 'gi://GLib';
 import St from 'gi://St';
+import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 
 export class PasswordInput {
     constructor({stealth, onSubmit, onActivity, revealTimeoutSeconds = 10}) {
@@ -70,7 +71,7 @@ export class PasswordInput {
                 return Clutter.EVENT_STOP;
             if (alt && event.get_key_unicode() === 0)
                 return Clutter.EVENT_STOP;
-            this.actor.grab_key_focus();
+            this.actor.clutter_text.grab_key_focus();
             return Clutter.EVENT_PROPAGATE;
         }
         if (type === Clutter.EventType.KEY_RELEASE) {
@@ -117,12 +118,10 @@ export class PasswordInput {
         const focus = stage?.get_key_focus();
         const focused = focus && (focus === this.actor || this.actor.contains(focus));
         if (focused)
-            stage.set_key_focus(null);
+            Main.inputMethod.currentFocus?.reset();
         this.actor.text = '';
         this.actor.password_visible = false;
         this._onActivity();
-        if (focused)
-            this.actor.grab_key_focus();
     }
 
     destroy() {

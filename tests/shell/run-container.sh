@@ -2,14 +2,14 @@
 
 set -euo pipefail
 
-if [[ $# != 2 || ! "$1" =~ ^(45|46|47|48|49|50|51)$ || ! "$2" =~ ^registry\.gitlab\.gnome\.org/gnome/mutter/fedora/[0-9]+@sha256:[0-9a-f]{64}$ ]]; then
-    echo "Usage: $0 gnome-major pinned-official-mutter-image" >&2
+if [[ $# != 2 || ! "$1" =~ ^(45|46|47|48|49|50|51)$ || ! "$2" =~ ^registry\.fedoraproject\.org/fedora:[0-9]+@sha256:[0-9a-f]{64}$ ]]; then
+    echo "Usage: $0 gnome-major pinned-official-fedora-image" >&2
     exit 2
 fi
 version="$1"
 image="$2"
 fedora="${image%\@*}"
-fedora="${fedora##*/}"
+fedora="${fedora##*:}"
 project="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 staging="$(mktemp -d /tmp/stealth-lock-container.XXXXXX)"
 identifier="stealth-lock-native-${version}-$(basename "$staging")"

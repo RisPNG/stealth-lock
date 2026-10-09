@@ -7,7 +7,7 @@ import {fileURLToPath} from 'node:url';
 import test from 'node:test';
 
 const project = fileURLToPath(new URL('../..', import.meta.url));
-const image = `registry.gitlab.gnome.org/gnome/mutter/fedora/39@sha256:${'a'.repeat(64)}`;
+const image = `registry.fedoraproject.org/fedora:39@sha256:${'a'.repeat(64)}`;
 
 function createContainerFixture(t) {
     const directory = mkdtempSync(join(tmpdir(), 'stealth-lock-container-runner-'));
@@ -61,6 +61,8 @@ test('the native runner accepts mixed-case temporary paths and cleans only its b
     const calls = readFileSync(log, 'utf8').trim().split('\n').map(line => JSON.parse(line));
     const identifier = 'stealth-lock-native-45-stealth-lock-container.mixedcase';
     assert.equal(calls[0].arguments[calls[0].arguments.indexOf('--tag') + 1], `${identifier}:test`);
+    assert.ok(calls[0].arguments.includes(`BASE_IMAGE=${image}`));
+    assert.ok(calls[0].arguments.includes('FEDORA_VERSION=39'));
     assert.deepEqual(calls[0].source, ['committed.txt', 'tests/shell/Containerfile', 'tests/shell/run-container.sh']);
     const launch = calls.find(call => call.arguments[0] === 'run').arguments;
     assert.equal(launch[launch.indexOf('--name') + 1], identifier);
@@ -85,10 +87,10 @@ test('a failed native image build preserves its exit status and still cleans its
 
 test('the native runner rejects unpinned images and unsupported versions before creating resources', t => {
     const {staging, log, env, script} = createContainerFixture(t);
-    for (const arguments_ of [['44', image], ['45', 'registry.gitlab.gnome.org/gnome/mutter/fedora/39:latest']]) {
+    for (const arguments_ of [['44', image], ['45', 'registry.fedoraproject.org/fedora:39']]) {
         const result = spawnSync('bash', [script, ...arguments_], {env, encoding: 'utf8'});
         assert.equal(result.status, 2);
-        assert.match(result.stderr, /pinned-official-mutter-image/);
+        assert.match(result.stderr, /pinned-official-fedora-image/);
     }
     assert.equal(existsSync(staging), false);
     assert.equal(existsSync(log), false);

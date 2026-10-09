@@ -59,6 +59,15 @@ try {
     assert(settings.get_boolean('visual-effect-initialized') && settings.get_string('visual-effect-active') === '', 'Starter effects initialize once and remain inactive');
     window.present();
     await waitFor(() => window.is_active, 'Actual Extensions preferences window gains native focus');
+    async function openEditor(title) {
+        const row = findWidget(window, widget => widget instanceof Adw.ActionRow && widget.title === title);
+        const button = findWidget(row, widget => widget instanceof Gtk.Button && ['Set shortcut', 'Edit CSS and saved styles', 'Edit effect presets'].includes(widget.tooltip_text));
+        assert(button.grab_focus(), 'Editor button accepts native keyboard focus');
+        await waitFor(() => window.get_focus() === button, 'Editor button gains keyboard focus');
+        await injectShortcut(['Return']);
+        await waitFor(() => preferences._dialogs.size === 1 && [...preferences._dialogs][0].get_mapped() && [...preferences._dialogs][0].is_active, 'Native button opens an active editor');
+    }
+
     for (const [title, key] of [
         ['Freeze Display', 'freeze-display'], ['Pause Media', 'pause-media'],
         ['Follow Cursor', 'normal-prompt-follow-cursor'], ['Enable Debug Mode', 'debug-mode'],
@@ -128,13 +137,14 @@ try {
     useActivation.active = false;
     assert(settings.get_strv('debug-abort-hotkey')[0] === custom, 'Disabling sharing preserves the stored custom abort shortcut');
     assert(abortLabel.accelerator === custom, 'Disabling sharing displays the custom abort shortcut');
-    preferences._showShortcutEditor(window, settings, 'lock-hotkey');
-    for (const dialog of preferences._dialogs)
+    await openEditor('Activation Hotkey');
+    for (const dialog of preferences._dialogs) {
         dialog.response(Gtk.ResponseType.CANCEL);
+        await waitFor(() => window.is_active, 'Preferences regain focus after shortcut cancellation');
+    }
     assert(preferences._dialogs.size === 0, 'Shortcut dialog did not close');
-    preferences._showShortcutEditor(window, settings, 'lock-hotkey');
+    await openEditor('Activation Hotkey');
     const shortcutDialog = [...preferences._dialogs][0];
-    await delay(100);
     await injectShortcut(['j']);
     assert(!shortcutDialog.get_widget_for_response(Gtk.ResponseType.OK).sensitive, 'Printable shortcut rejected');
     await injectShortcut(['Control_L', 'Alt_L', 'j']);
@@ -142,19 +152,20 @@ try {
     shortcutDialog.response(Gtk.ResponseType.OK);
     assert(settings.get_strv('lock-hotkey')[0] === '<Control><Alt>j', 'Shortcut Save did not persist its preview');
     assert(preferences._dialogs.size === 0, 'Saved shortcut dialog did not close');
-    preferences._showShortcutEditor(window, settings, 'lock-hotkey');
+    await waitFor(() => window.is_active, 'Preferences regain focus after saving the shortcut');
+    await openEditor('Activation Hotkey');
     const resetDialog = [...preferences._dialogs][0];
-    await delay(100);
     await injectShortcut(['BackSpace']);
     resetDialog.response(Gtk.ResponseType.OK);
     assert(settings.get_user_value('lock-hotkey') === null, 'Native Backspace and Save reset to schema default');
-    preferences._showShortcutEditor(window, settings, 'lock-hotkey');
-    await delay(100);
+    await waitFor(() => window.is_active, 'Preferences regain focus after resetting the shortcut');
+    await openEditor('Activation Hotkey');
     await injectShortcut(['Escape']);
     assert(preferences._dialogs.size === 0, 'Native Escape cancels shortcut dialog');
+    await waitFor(() => window.is_active, 'Preferences regain focus after native Escape');
 
     for (const key of ['normal-prompt-css', 'normal-background-css']) {
-        preferences._showSavedEntryEditor(window, settings, key, 'CSS Test', 'Test CSS');
+        await openEditor(key === 'normal-prompt-css' ? 'Prompt CSS' : 'Background CSS');
         const dialog = [...preferences._dialogs][0];
         const editor = findWidget(dialog, widget => widget instanceof Gtk.TextView);
         const name = findWidget(dialog, widget => widget instanceof Gtk.Entry);
@@ -180,10 +191,11 @@ try {
         buffer.set_text('padding: 4px;', -1);
         dialog.response(Gtk.ResponseType.OK);
         assert(settings.get_string(key) === 'padding: 4px;', 'Style Apply did not persist the editor');
+        await waitFor(() => window.is_active, 'Preferences regain focus after applying CSS');
     }
     const effectRow = findWidget(window, widget => widget instanceof Adw.ComboRow && widget.title === 'Visual Effect');
     assert(effectRow.model.get_n_items() === 4 && effectRow.selected === 0, 'Native effect selector offers None and all ordinary entries');
-    preferences._showSavedEntryEditor(window, settings, 'visual-effect-active', 'Visual Effect Programs', 'Native effect test');
+    await openEditor('Visual Effect');
     let effectDialog = [...preferences._dialogs][0];
     let selector = findWidget(effectDialog, widget => widget instanceof Gtk.DropDown);
     let effectBuffer = findWidget(effectDialog, widget => widget instanceof Gtk.TextView).buffer;
@@ -223,10 +235,10 @@ try {
     effectName.text = 'Native custom effect';
     findWidget(effectDialog, widget => widget instanceof Gtk.Button && widget.label === 'Save As New').emit('clicked');
     effectDialog.response(Gtk.ResponseType.OK);
-    await waitFor(() => !preferences._dialogs.has(effectDialog), 'Valid Apply completes isolated syntax checking before activation');
+    await waitFor(() => !preferences._dialogs.has(effectDialog) && window.is_active, 'Valid Apply completes isolated checking and restores native focus');
     assert(settings.get_string('visual-effect-active') === 'Native custom effect', 'Apply selects an ordinary saved custom program');
     assert(effectRow.selected === 4, 'Native effect selector follows active saved name');
-    preferences._showSavedEntryEditor(window, settings, 'visual-effect-active', 'Visual Effect Programs', 'Native effect test');
+    await openEditor('Visual Effect');
     effectDialog = [...preferences._dialogs][0];
     findWidget(effectDialog, widget => widget instanceof Gtk.Entry).text = 'Native renamed effect';
     findWidget(effectDialog, widget => widget instanceof Gtk.Button && widget.label === 'Rename').emit('clicked');
@@ -237,6 +249,7 @@ try {
     while (selector.model.get_n_items() > 0)
         findWidget(effectDialog, widget => widget instanceof Gtk.Button && widget.label === 'Delete').emit('clicked');
     effectDialog.response(Gtk.ResponseType.CANCEL);
+    await waitFor(() => window.is_active, 'Preferences regain focus after visual program cancellation');
     assert(settings.get_string('visual-effect-presets') === '[]' && effectRow.model.get_n_items() === 1, 'All starter entries can be deleted from the ordinary library');
     const {initializeEffectPresets} = await import(dir.resolve_relative_path('shared/presets.js').get_uri());
     initializeEffectPresets(settings);

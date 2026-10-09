@@ -12,7 +12,8 @@ RUN if [ "$FEDORA_VERSION" -le 42 ]; then \
     fi && \
     dnf -y "$@" upgrade && \
     dnf -y "$@" install \
-        gnome-shell gnome-extensions-app gjs gtk4 libadwaita gdm \
+        gnome-shell gnome-extensions-app gjs gtk4 libadwaita gdm ibus \
+        default-fonts-core-mono default-fonts-core-emoji default-fonts-cjk-mono \
         javascriptcoregtk6.0 python3 bubblewrap openssl gettext zip unzip \
         dbus-daemon dbus-tools systemd shadow-utils util-linux procps-ng \
         mesa-dri-drivers mesa-libEGL mesa-vulkan-drivers which && \

@@ -1,5 +1,6 @@
 import GLib from 'gi://GLib';
 import IBus from 'gi://IBus';
+import Meta from 'gi://Meta';
 import Shell from 'gi://Shell';
 import St from 'gi://St';
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
@@ -91,22 +92,31 @@ export const tests = {
         assert(session._input.actor.password_visible, 'Normal prompt reveals');
         await chord(helper, ['Control_L'], 'r');
         assert(!session._input.actor.password_visible, 'Normal prompt conceals');
+        const preedit = IBus.Text.new_from_string('composition');
+        preedit.set_attributes(IBus.AttrList.new());
+        preedit.append_attribute(IBus.AttrType.UNDERLINE, IBus.AttrUnderline.SINGLE, 0, preedit.get_length());
         for (const [modifiers, key] of [[[], 'Escape'], [['Control_L'], 'u']]) {
             session._input.actor.text = 'committed';
-            Main.inputMethod._onUpdatePreeditText(null, IBus.Text.new_from_string('composition'), 0, true, IBus.PreeditFocusMode.COMMIT);
+            Main.inputMethod._onUpdatePreeditText(null, preedit, 0, true, IBus.PreeditFocusMode.COMMIT);
             await delay(30);
             assert(session._input.actor.clutter_text.has_preedit(), 'Composition fixture active');
+            await chord(helper, [], 'Shift_L');
+            assert(session._input.actor.clutter_text.has_preedit(), 'Allowed modifier preserves composition');
+            equal(global.stage.key_focus, session._input.actor.clutter_text, 'Allowed modifier retains native editable focus');
+            assert(Main.inputMethod.currentFocus?.is_focused(), 'Allowed modifier retains native input-method focus');
             await chord(helper, modifiers, key);
             assert(!session._input.actor.clutter_text.has_preedit() && session._input.actor.text === '', 'Clear removes composition and committed secret');
         }
         settings.set_uint('auto-reset-seconds', 1);
-        Main.inputMethod._onUpdatePreeditText(null, IBus.Text.new_from_string('composition'), 0, true, IBus.PreeditFocusMode.COMMIT);
+        Main.inputMethod._onUpdatePreeditText(null, preedit, 0, true, IBus.PreeditFocusMode.COMMIT);
         await waitFor(() => !session._input.actor.clutter_text.has_preedit(), 'Inactivity clears composition', 2500);
         equal(session._passwordReset, 0, 'Inactivity timer released');
     },
 
     async 'in-memory freeze and all cursor modes restore native pointer/focus'({extension, settings}) {
-        const tracker = global.backend.get_cursor_tracker();
+        const tracker = Meta.CursorTracker.get_for_display
+            ? Meta.CursorTracker.get_for_display(global.display)
+            : global.backend.get_cursor_tracker();
         const visibility = tracker.get_pointer_visible();
         const focus = global.stage.key_focus;
         for (const mode of ['normal', 'hidden', 'lock-icon']) {

@@ -80,19 +80,19 @@ jobs:
       matrix:
         include:
           - shell: 45
-            image: registry.gitlab.gnome.org/gnome/mutter/fedora/39@sha256:4b03855787ec1e93dba683727c45bb4c3866fa6f50483ebff8b57d5f90480222
+            image: registry.fedoraproject.org/fedora:39@sha256:cec481e2f23201e51aef96c1811fbad730e952a35e60686b082de23c36c44683
           - shell: 46
-            image: registry.gitlab.gnome.org/gnome/mutter/fedora/40@sha256:0e9c049a3f09817b519209148431bfb0bac8c64c41a0802806653579858b646a
+            image: registry.fedoraproject.org/fedora:40@sha256:13aabccdff710503b5c7874810d1b50b2a64767875bca25509d147b7cdc487b8
           - shell: 47
-            image: registry.gitlab.gnome.org/gnome/mutter/fedora/41@sha256:e618cc9725ed188e8411f22c90fd20783bc32a075798ce5cc0152792ded2efbc
+            image: registry.fedoraproject.org/fedora:41@sha256:893f7eeffce8e3e2bb2bc62786ba5603fb1e0bd6ba07091acb892266b95bafdf
           - shell: 48
-            image: registry.gitlab.gnome.org/gnome/mutter/fedora/42@sha256:f38abfa7582a77aca3baab8cb95af22b611f395a2f089a0fad8b3b7015c07e81
+            image: registry.fedoraproject.org/fedora:42@sha256:e78cd1a688cd079c23864f289a89a49a3f4ad66d817864e325e1d058310ee95c
           - shell: 49
-            image: registry.gitlab.gnome.org/gnome/mutter/fedora/43@sha256:562ed214c807dae4f94178d6cb9497e526c106102edefe8ff7294d88e2847859
+            image: registry.fedoraproject.org/fedora:43@sha256:005ce311c13eaa639de9d9c52e470f10652c7371561697fb8c1c6e852e23c481
           - shell: 50
-            image: registry.gitlab.gnome.org/gnome/mutter/fedora/44@sha256:d6af0e9dd27d32de34ef4a8025220499f90e0f0211ae0d4e8e1af076166c043b
+            image: registry.fedoraproject.org/fedora:44@sha256:ba35579e107f26a4c2c000390fb3ff549f3858a9584a6b5a35f7fa51f54de309
           - shell: 51
-            image: registry.gitlab.gnome.org/gnome/mutter/fedora/45@sha256:093cce1a3c819c27c075e347e195be91145197bff869ba7325f5c934fab3bf88
+            image: registry.fedoraproject.org/fedora:45@sha256:cc55518dc3593184519ae4184a814a26d6405b42713762d57353659fd7105445
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:

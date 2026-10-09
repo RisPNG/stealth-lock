@@ -224,7 +224,7 @@ async function editor({key = 'visual-effect-active', library = '[]', active = ''
         get text() { return this._text ?? ''; }
         set text(value) { this._text = value; this.emit('changed'); }
         destroy() { this.destroyed = true; }
-        present() { this.presented = true; }
+        set_visible(value) { this.visible = value; }
     }
     class Names {
         constructor(values) { this.values = values; this.selectors = new Set(); }

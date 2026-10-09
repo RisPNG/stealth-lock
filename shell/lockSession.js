@@ -145,7 +145,7 @@ export class LockSession {
                 overlay.actor.opacity = 255;
             }
             overlay.info.text = 'Stealth Lock privacy screen\nPassword required\nCtrl+Alt+Shift+L: GNOME lock';
-            input.actor.grab_key_focus();
+            input.actor.clutter_text.grab_key_focus();
         } catch (error) {
             if (this.cancellable.is_cancelled())
                 return;
@@ -155,7 +155,7 @@ export class LockSession {
                     this._ready = true;
                     this._overlay.actor.opacity = 255;
                     this._overlay.setStatus('Setup incomplete; password or Ctrl+Alt+Shift+L required');
-                    this._input.actor.grab_key_focus();
+                    this._input.actor.clutter_text.grab_key_focus();
                 } else {
                     this.close({clearState: false});
                     Main.notifyError('Stealth Lock could not protect the desktop', error.message);
@@ -186,7 +186,7 @@ export class LockSession {
                 return;
             overlay.actor.opacity = 255;
             this._ready = true;
-            this._input.actor.grab_key_focus();
+            this._input.actor.clutter_text.grab_key_focus();
         } catch (error) {
             if (!this.cancellable.is_cancelled() && generation === this._layoutGeneration) {
                 overlay.actor.opacity = 255;

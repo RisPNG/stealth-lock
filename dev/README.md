@@ -81,7 +81,7 @@ The helper derives the account from the current UID. Success requires a secret p
 
 System Lock Screen delegates fingerprint, smartcard, multi-factor authentication, password changes and other account-policy conversations to GNOME's native lock. Availability depends on the system's configuration.
 
-GNOME's native password entry owns Unicode editing and input-method composition. Clipboard paste, copy, cut and middle-click paste are blocked. Normal mode supports permitted keyboard, mouse and touch password reveal, with adjustable concealment and inactivity timeouts. Stealth mode keeps the entry hidden.
+GNOME's native password entry owns Unicode editing and input-method composition. Discarding input resets native composition before clearing text and preserves the editable field's focus. Clipboard paste, copy, cut and middle-click paste are blocked. Normal mode supports permitted keyboard, mouse and touch password reveal, with adjustable concealment and inactivity timeouts. Stealth mode keeps the entry hidden.
 
 Before claiming protection, the privacy actor must own the active stage grab. Runtimes exposing device-grab state must also report both keyboard and pointer capture. Newer Wayland-only Mutter guarantees complete native grabs, but the active actor must still be verified. A failed acquisition follows the native lock fallback and reports failure if protection cannot be established.
 
@@ -256,7 +256,7 @@ Expected fixture messages must match exact declarations recorded before their sc
 
 The separate Python authentication suite includes real `pam_unix` and `pam_faillock` transactions. Bubblewrap maps the current UID/GID to namespace root and exposes private disposable passwd/shadow files, an administrator-owned `gdm-password` policy and failure tally. It checks correct/wrong passwords, account/password expiry, locked hashes, lockout/reset, missing services/modules and unsafe policy permissions without reaching the host account or policy. It does not validate every distribution's PAM configuration.
 
-CI runs source checks and actual GNOME 45–51 runtimes. Source checks use an owned user slice with a 2 GiB memory ceiling, two CPUs and 600 tasks. Each native job uses a digest-pinned official GNOME Mutter Fedora image, installs that Fedora release's runtime, asserts its Shell major and runs as a dedicated nonroot user in an owned systemd container. The container has a 2 GiB memory ceiling and two CPUs; the native fixture retains the stricter aggregate limits above. Older releases use signed RPMs from the official Fedora archive.
+CI runs source checks and actual GNOME 45–51 runtimes. Source checks use an owned user slice with a 2 GiB memory ceiling, two CPUs and 600 tasks. Each native job uses a digest-pinned image from Fedora's official registry, explicitly installs the runtime and test dependencies, asserts its Shell major and runs as a dedicated nonroot user in an owned systemd container. The container has a 2 GiB memory ceiling and two CPUs; the native fixture retains the stricter aggregate limits above. Older releases use signed RPMs from the official Fedora archive.
 
 Pushes and pull requests containing only Markdown changes, including README edits, skip the automated workflow. A manual run remains available through `workflow_dispatch`.
 

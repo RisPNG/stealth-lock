@@ -104,7 +104,7 @@ async function runtime({capture, verification, handoff = false, grabbed = true, 
             this.onActivity = onActivity;
             this.actor = {text: '', password_visible: false, grab_key_focus: () => events.push('focus'), contains: () => false};
             this.preedit = false;
-            this.actor.clutter_text = {has_preedit: () => this.preedit};
+            this.actor.clutter_text = {has_preedit: () => this.preedit, grab_key_focus: () => events.push('focus')};
         }
         discardPassword() {
             this.actor.text = '';
