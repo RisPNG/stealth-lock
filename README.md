@@ -14,6 +14,7 @@ Stealth Lock lets you do these with a choice of your own customizable screen loc
 ## Installation and Update
 
 Stealth Lock should work on GNOME 45 onwards. Download or clone the source, then execute the install script and relog for both installation and update:
+
 ```sh
 bash install.sh
 ```
@@ -39,7 +40,7 @@ Open the extension settings to configure Stealth Lock:
 
 - **Freeze Display** keeps a still image of your desktop on screen. Turn it off to let the display keep updating.
 - **Pause Media** pauses supported players and tries to resume them when you unlock.
-- **Cursor** lets you use the lock icon, your normal cursor or no cursor. Choose its colours or supply your own image.
+- **Cursor** lets you use the lock icon, your normal cursor, or no cursor. Choose its colours or supply your own image.
 - **Password prompt** can follow your pointer or stay at a chosen position on a selected monitor.
 - **Appearance** gives you saved visual effects, clocks and custom CSS.
 

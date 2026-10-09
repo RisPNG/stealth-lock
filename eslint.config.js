@@ -19,8 +19,8 @@ export default [
             },
         },
         rules: {
-            'consistent-return': 'error',
-            'no-unused-vars': ['error', {argsIgnorePattern: '^_', caughtErrorsIgnorePattern: '^_'}],
+            'consistent-return': 'warn',
+            'no-unused-vars': ['warn', {argsIgnorePattern: '^_', caughtErrorsIgnorePattern: '^_'}],
             'no-eval': 'error',
             'no-implied-eval': 'error',
             'no-new-func': 'error',

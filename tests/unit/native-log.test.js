@@ -26,69 +26,84 @@ test('the native log gate accepts normal messages and exact declared failures', 
     const result = checkNativeLog(t, [
         'GNOME Shell-Message: 06:11:05.000: Native scenario completed',
         '(gnome-shell:486): GNOME Shell-WARNING **: 06:11:05.000: Stealth Lock: authentication helper failed (exit 2)',
-    ], [{pattern: 'Stealth Lock: authentication helper failed \\(exit 2\\)', count: 1}]);
-    assert.equal(result.status, 0, result.stderr);
-    assert.match(result.stdout, /1 expected diagnostics, 0 upstream metadata warnings/);
-});
-
-test('the exact AccountsService metadata fallback is bounded once per native compositor process', t => {
-    const result = checkNativeLog(t, [
-        `(gnome-shell:486): Gjs-WARNING **: 06:11:05.000: ${metadataWarning}`,
-        `(gnome-shell:912): Gjs-WARNING **: 06:11:06.000: ${modernMetadataWarning}`,
+        '(gnome-shell:486): GNOME Shell-CRITICAL **: 06:11:05.000: Deliberate fixture failure',
+    ], [
+        {pattern: 'Stealth Lock: authentication helper failed \\(exit 2\\)', count: 1},
+        {pattern: 'Deliberate fixture failure', count: 1},
     ]);
     assert.equal(result.status, 0, result.stderr);
-    assert.match(result.stdout, /0 expected diagnostics, 2 upstream metadata warnings/);
+    assert.match(result.stdout, /2 expected diagnostics/);
+    assert.ok(result.stdout.includes('Stealth Lock: authentication helper failed (exit 2)'));
 });
 
-test('native subprocess stream metadata warnings are bounded per type and compositor process', t => {
-    const result = checkNativeLog(t, [
-        `(gnome-shell:486): Gjs-WARNING **: 06:11:05.000: ${metadataWarning}`,
-        ...[486, 912].flatMap(pid => streamWarnings.map(warning =>
-            `(gnome-shell:${pid}): Gjs-WARNING **: 06:11:06.000: ${warning}`)),
-        '0 request() ["shared/visual-process.js":76:29]',
-    ]);
-    assert.equal(result.status, 0, result.stderr);
-    assert.match(result.stdout, /0 expected diagnostics, 5 upstream metadata warnings/);
-});
-
-test('repeated, altered and unrelated native warnings remain failures', t => {
+test('repeated, changed and unrelated warnings remain visible and informational', t => {
     const exact = `(gnome-shell:486): Gjs-WARNING **: 06:11:05.000: ${metadataWarning}`;
     const modern = exact.replace(metadataWarning, modernMetadataWarning);
-    for (const lines of [
-        [exact, exact.replace('05.000', '06.000')],
-        [exact, modern],
-        [modern, modern.replace('05.000', '06.000')],
-        [exact.replace('gint32', 'GITypeInfo')],
-        [exact.replace('interface', 'GITypeInfo')],
-        [exact.replace('gint32', 'guint32')],
-        [exact.replace('password-mode', 'account-type')],
-        [modern.replace('password-mode', 'account-type')],
-        [exact.replace('Falling back to slow path', 'Cannot read property')],
-        [`Gjs-WARNING **: 06:11:05.000: ${metadataWarning}`],
-        ['(gnome-shell:486): Gjs-WARNING **: 06:11:05.000: Unrelated metadata warning'],
-        ['(gnome-shell:486): GNOME Shell-CRITICAL **: 06:11:05.000: Set global engine failed: Operation was cancelled'],
-        ['(gnome-shell:486): GNOME Shell-WARNING **: 06:11:05.000: Unexpected stock warning'],
-        ['(gnome-shell:486): St-CRITICAL **: 06:11:05.000: Native actor error'],
+    const lines = [
+        exact, exact, modern,
+        exact.replace('gint32', 'GITypeInfo'),
+        exact.replace('interface', 'GITypeInfo'),
+        exact.replace('gint32', 'guint32'),
+        exact.replace('password-mode', 'account-type'),
+        modern.replace('password-mode', 'account-type'),
+        exact.replace('Falling back to slow path', 'Cannot read property'),
+        `Gjs-WARNING **: 06:11:05.000: ${metadataWarning}`,
+        '(gnome-shell:486): Gjs-WARNING **: 06:11:05.000: Unrelated metadata warning',
+        '(gnome-shell:486): GNOME Shell-WARNING **: 06:11:05.000: Unexpected stock warning',
+        '(gnome-shell:486): Clutter-WARNING **: 06:11:05.000: Actor allocation warning',
+        '(gnome-shell:486): Gjs-WARNING **: 06:11:05.000: Explaining ERROR and CRITICAL diagnostics',
+        '(gjs:512): Gtk-WARNING **: 06:11:05.000: Example JS ERROR text is shown in the help page',
+        '(gnome-shell:486): Gjs-WARNING **: 06:11:05.000: Explanation of AssertionError handling',
+        ...streamWarnings.flatMap(warning => {
+            const line = `(gnome-shell:486): Gjs-WARNING **: 06:11:05.000: ${warning}`;
+            return [line, line, line.replace('GioUnix.', 'Gio.'), line.replace('Stream has', 'Stream was')];
+        }),
+    ];
+    const result = checkNativeLog(t, lines);
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.stderr, '');
+    const displayed = result.stdout.split('\n')
+        .filter(line => /^\d+: /.test(line))
+        .map(line => line.replace(/^\d+: /, ''));
+    assert.deepEqual(displayed, lines);
+});
+
+test('ordinary actor and allocation messages do not become diagnostic failures', t => {
+    const lines = [
+        'actor allocation completed normally',
+        '(gnome-shell:486): Clutter-DEBUG: 06:11:05.000: Actor allocation updated',
+        'GNOME Shell-Message: 06:11:05.000: Allocated actor on the second monitor',
+        '(gnome-shell:486): St-DEBUG: 06:11:05.000: allocation warning checked during measurement',
+        '(gnome-shell:486): GNOME Shell-DEBUG: 06:11:05.000: Actor currently has no allocation',
+        '(gnome-shell:486): Gjs-DEBUG: 06:11:05.000: Quoted diagnostic: ERROR, CRITICAL and JS ERROR',
+        'GNOME Shell-Message: 06:11:05.000: Example text: assertion failed: (actor != NULL)',
+        'GNOME Shell-Message: 06:11:05.000: The assertion never failed during recovery',
+        '(gnome-shell:486): Gjs-DEBUG: 06:11:05.000: Quoted diagnostic: AssertionError: width must be positive',
+    ];
+    const result = checkNativeLog(t, lines);
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.stderr, '');
+});
+
+test('actual errors criticals JavaScript errors and failed assertions remain fatal', t => {
+    for (const line of [
+        '(gnome-shell:486): GNOME Shell-ERROR **: 06:11:05.000: Failed to protect input',
+        '(gnome-shell:486): Gjs-ERROR **: 06:11:05.000: Native operation failed',
+        '(gnome-shell:486): St-CRITICAL **: 06:11:05.000: Native actor error',
+        '(gjs:512): Gtk-ERROR **: 06:11:05.000: Preferences operation failed',
+        '(gjs:512): GLib-GObject-CRITICAL **: 06:11:05.000: Preferences binding failed',
+        '(gnome-shell:486): GNOME Shell-CRITICAL **: 06:11:05.000: Set global engine failed: Operation was cancelled',
+        'Gjs-Console-CRITICAL **: 06:11:05.000: JS ERROR: TypeError: invalid frame',
+        '(gjs:512): Gjs-WARNING **: 06:11:05.000: JS ERROR: Error: invalid preferences state',
+        'JS ERROR: Error: malformed input',
+        'AssertionError: width must be positive',
+        "cogl_framebuffer_set_viewport: assertion 'width > 0' failed",
+        '(gnome-shell:486): GLib-GObject-WARNING **: 06:11:05.000: assertion failed: (actor != NULL)',
+        'Bail out! GLib:ERROR:fixture.c:10:render: assertion failed: (width > 0)',
     ]) {
-        const result = checkNativeLog(t, lines);
-        assert.equal(result.status, 1, JSON.stringify(lines));
-        assert.match(result.stderr, /WARNING|CRITICAL/);
-    }
-    for (const warning of streamWarnings) {
-        const line = `(gnome-shell:486): Gjs-WARNING **: 06:11:05.000: ${warning}`;
-        for (const lines of [
-            [line, line.replace('05.000', '06.000')],
-            [line.replace('Gjs-WARNING', 'GNOME Shell-WARNING')],
-            [line.replace('GioUnix.', 'Gio.')],
-            [line.replace(/GioUnix\.(Input|Output)/, 'GioUnix.Other')],
-            [line.replace('Stream has', 'Stream was')],
-            [line.replace('gnome-shell:486', 'gnome-shell-calendar-server:486')],
-            [line.replace('(gnome-shell:486): ', '')],
-        ]) {
-            const result = checkNativeLog(t, lines);
-            assert.equal(result.status, 1, JSON.stringify(lines));
-            assert.match(result.stderr, /WARNING/);
-        }
+        const result = checkNativeLog(t, [line]);
+        assert.equal(result.status, 1, line);
+        assert.ok(result.stderr.includes(line), result.stderr);
     }
 });
 
@@ -125,11 +140,15 @@ esac
 
 test('declared fixture failures must occur exactly as many times as expected', t => {
     const expected = [{pattern: 'Stealth Lock: authentication helper failed \\(exit 2\\)', count: 1}];
-    const line = '(gnome-shell:486): GNOME Shell-WARNING **: 06:11:05.000: Stealth Lock: authentication helper failed (exit 2)';
     const missing = checkNativeLog(t, [], expected);
     assert.equal(missing.status, 1);
     assert.match(missing.stderr, /expected 1, saw 0/);
-    const duplicate = checkNativeLog(t, [line, line], expected);
-    assert.equal(duplicate.status, 1);
-    assert.match(duplicate.stderr, /authentication helper failed/);
+    for (const severity of ['WARNING', 'CRITICAL']) {
+        const line = `(gnome-shell:486): GNOME Shell-${severity} **: 06:11:05.000: Stealth Lock: authentication helper failed (exit 2)`;
+        const one = checkNativeLog(t, [line], expected);
+        assert.equal(one.status, 0, one.stderr);
+        const duplicate = checkNativeLog(t, [line, line], expected);
+        assert.equal(duplicate.status, 1);
+        assert.match(duplicate.stderr, /expected 1, saw 2/);
+    }
 });

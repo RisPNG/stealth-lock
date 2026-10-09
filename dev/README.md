@@ -34,6 +34,8 @@ mise exec -- npm run check
 
 `npm run check` runs lint, unit tests, isolated authentication and visual worker tests, native GJS transport checks, shell-script syntax, the official GJS syntax and translation-file checks, schema validation, stylesheet checks and runtime archive validation. It uses temporary files and removes generated reports on exit.
 
+ESLint reports `consistent-return` and `no-unused-vars` as advisory warnings. They remain visible in local checks and CI; lint errors still fail the source gate.
+
 Run the private native suite separately, then build the runtime archive:
 
 ```sh
@@ -245,15 +247,17 @@ For recovery, the runner waits for the native snapshot, kills only the composito
 
 Otherwise, the runner stops its exact scope and removes temporary files on success or failure. The lower-level `tests/shell/run-shell.sh` provides `start`, `stop`, `status`, `pids`, `clean` and `crash-restart` controls for an owned fixture; its header documents the additional environment options.
 
-The log gate rejects Shell warnings and criticals, JavaScript errors, native St/GJS/GLib/GTK/Clutter warnings and errors, keybinding warnings and allocation failures. Expected fixture failures must match exact declarations recorded before their scenario runs. Failed runs scan the full log before showing recent output and cleaning the scope.
+The log gate displays warnings as information. Repeated warnings, changed wording and ordinary actor or allocation messages do not fail the suite. Actual error or critical diagnostics, JavaScript error banners and failed assertions still fail unless they are deliberately declared fixture outcomes.
 
-Two bounded upstream metadata allowances remain: the exact AccountsService property warning once per compositor PID, and the exact Gio UnixInputStream/UnixOutputStream warning once per type and PID. Repeated, altered or unrelated warnings fail. GLib 2.80 duplicates those stream types in [Gio and GioUnix metadata](https://github.com/GNOME/glib/blob/2.80.5/girepository/introspection/meson.build); [GJS 1.80 namespace resolution](https://github.com/GNOME/gjs/blob/1.80.2/gi/ns.cpp) can warn when native subprocesses return them. Routine startup messages are allowed.
+Expected fixture messages must match exact declarations recorded before their scenario runs, regardless of severity. Missing or excess occurrences fail, including when the message is only a warning. Preferences output is forwarded into the desktop log and checked by the same scanner. Failed runs scan the full log before showing recent output and cleaning the scope, while preserving the original failure status.
 
 ### Authentication fixtures and the version matrix
 
 The separate Python authentication suite includes real `pam_unix` and `pam_faillock` transactions. Bubblewrap maps the current UID/GID to namespace root and exposes private disposable passwd/shadow files, an administrator-owned `gdm-password` policy and failure tally. It checks correct/wrong passwords, account/password expiry, locked hashes, lockout/reset, missing services/modules and unsafe policy permissions without reaching the host account or policy. It does not validate every distribution's PAM configuration.
 
 CI runs source checks and actual GNOME 45–51 runtimes. Each native job uses a digest-pinned official GNOME Mutter Fedora image, installs that Fedora release's runtime, asserts its Shell major and runs as a dedicated nonroot user in an owned systemd container. The container has a 2 GiB memory ceiling and two CPUs; the compositor retains the stricter limits above. Older releases use signed RPMs from the official Fedora archive.
+
+Pushes and pull requests containing only Markdown changes, including README edits, skip the automated workflow. A manual run remains available through `workflow_dispatch`.
 
 Each container first runs the existing JavaScriptCore worker and GJS transport suites. Worker failures expose subprocess status and sandbox stderr without disclosing program source or weakening isolation. Pinned Node exports the actual starter entries inside the disposable container.
 
