@@ -13,7 +13,23 @@ You might simply prefer to see your desktop while you step away.
 Stealth Lock lets you do these with a choice of your own customizable screen lock effects.
 ## Installation and Update
 
-Stealth Lock should work on GNOME 45 onwards. Download or clone the source, then execute the install script and relog for both installation and update:
+Stealth Lock should work on GNOME 45 onwards. Run either command from your desktop account to install or update, then log out and back in to load the new code.
+
+Latest stable release:
+
+```sh
+curl -fsSL https://github.com/RisPNG/stealth-lock/releases/download/latest-release/install.sh | bash -s -- --release
+```
+
+Current development build:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/RisPNG/stealth-lock/main/install.sh | bash
+```
+
+The installer downloads and checks the published source archive, installs for your user and removes its temporary files. Rerun the same command to update; your settings and saved effects are preserved. The [runtime requirements](dev/README.md#requirements) still apply.
+
+If you already have the source, install or update it with:
 
 ```sh
 bash install.sh
@@ -55,16 +71,18 @@ Changes to effects, CSS, and the prompt position show immediately. Other session
 To remove the extension and keep your settings:
 
 ```sh
-bash uninstall.sh
+curl -fsSL https://raw.githubusercontent.com/RisPNG/stealth-lock/main/uninstall.sh | bash
 ```
 
 To remove it and reset your settings instead:
 
 ```sh
-bash uninstall.sh --purge-settings
+curl -fsSL https://raw.githubusercontent.com/RisPNG/stealth-lock/main/uninstall.sh | bash -s -- --purge-settings
 ```
 
 Choose one removal command. Resetting settings needs the installed files, so use that option before removing them.
+
+With a local source copy, use `bash uninstall.sh` or `bash uninstall.sh --purge-settings` instead.
 
 ## Development
 

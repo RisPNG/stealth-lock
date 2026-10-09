@@ -2,28 +2,49 @@ name: checks
 
 on:
   push:
-    paths-ignore:
-      - '**/*.md'
+    branches: ['**']
+    tags: ['**', '!latest-build', '!latest-release']
   pull_request:
     paths-ignore:
       - '**/*.md'
+  release:
+    types: [published]
   workflow_dispatch:
 
 permissions:
   contents: read
 
-concurrency:
-  group: checks-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
-
 jobs:
   checks:
+    if: github.ref_name != 'latest-build' && github.ref_name != 'latest-release'
     runs-on: ubuntu-24.04
     timeout-minutes: 20
+    concurrency:
+      group: checks-${{ github.workflow }}-${{ github.ref }}
+      cancel-in-progress: true
+    outputs:
+      publish: ${{ steps.channel.outputs.publish }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
+          ref: ${{ github.sha }}
           persist-credentials: false
+      - name: Select curl publication
+        id: channel
+        env:
+          EVENT: ${{ github.event_name }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          publish=false
+          if [[ "$EVENT" == push && "$GITHUB_REF" == "refs/heads/$DEFAULT_BRANCH" ]]; then
+            publish=true
+          elif [[ "$EVENT" == push || "$EVENT" == release ]]; then
+            tag=${GITHUB_REF#refs/tags/}
+            if [[ "$GITHUB_REF" == refs/tags/* && "$tag" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+              publish=true
+            fi
+          fi
+          echo "publish=$publish" >> "$GITHUB_OUTPUT"
       - uses: jdx/mise-action@c37c93293d6b742fc901e1406b8f764f6fb19dac
         with:
           version: 2026.10.4
@@ -74,6 +95,9 @@ jobs:
     needs: checks
     runs-on: ubuntu-24.04
     timeout-minutes: 30
+    concurrency:
+      group: native-${{ github.workflow }}-${{ github.ref }}-${{ matrix.shell }}
+      cancel-in-progress: true
     strategy:
       fail-fast: false
       max-parallel: 2
@@ -96,6 +120,7 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
+          ref: ${{ github.sha }}
           persist-credentials: false
       - uses: jdx/mise-action@c37c93293d6b742fc901e1406b8f764f6fb19dac
         with:
@@ -108,3 +133,64 @@ jobs:
           SHELL_VERSION: ${{ matrix.shell }}
           SHELL_IMAGE: ${{ matrix.image }}
         run: mise exec -- bash tests/shell/run-container.sh "$SHELL_VERSION" "$SHELL_IMAGE"
+
+  build-release:
+    needs: [checks, native]
+    if: needs.checks.outputs.publish == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    concurrency:
+      group: curl-build-${{ github.ref }}
+      cancel-in-progress: true
+    outputs:
+      commit: ${{ steps.bundle.outputs.commit }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: jdx/mise-action@c37c93293d6b742fc901e1406b8f764f6fb19dac
+        with:
+          version: 2026.10.4
+          install: false
+      - name: Build the checked source bundle
+        id: bundle
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: mise exec -- bash scripts/build-release.sh
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
+        with:
+          name: curl-release
+          path: ${{ steps.bundle.outputs.directory }}
+          if-no-files-found: error
+          retention-days: 14
+
+  publish-release:
+    needs: build-release
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    concurrency:
+      group: curl-publish-${{ github.ref_type == 'tag' && 'stable' || 'dev' }}
+      cancel-in-progress: false
+      queue: max
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: jdx/mise-action@c37c93293d6b742fc901e1406b8f764f6fb19dac
+        with:
+          version: 2026.10.4
+          install: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          name: curl-release
+          path: dist/publish
+      - name: Publish curl installation assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BUILD_COMMIT: ${{ needs.build-release.outputs.commit }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: mise exec -- bash scripts/publish-release.sh dist/publish

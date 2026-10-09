@@ -11,6 +11,7 @@ The files in `unit/` use controlled examples and test substitutes. Some also run
 | Test file | What it checks |
 | --- | --- |
 | [unit/authentication.test.js](unit/authentication.test.js) | Password submission, retry delays, timeouts and cancellation. Repeated submissions and late replies cannot approve an obsolete attempt, and diagnostics do not expose passwords. |
+| [unit/curl-release.test.js](unit/curl-release.test.js) | Curl bundles contain the committed source and matching checksums. Stable tags must match the source version. Publication preserves tagged assets on retries, keeps older versions from replacing the stable channel, rejects moved source references and writes alias manifests after the matching files are available. |
 | [unit/effects.test.js](unit/effects.test.js) | Effects, blur and clocks respond to settings, themes, displays and reduced motion. Invalid or expensive drawing and failed programs remove the effect while keeping the privacy screen active. |
 | [unit/harness.test.js](unit/harness.test.js) | The test setup loads the intended code with the supplied test substitutes and keeps separate tests from affecting one another. |
 | [unit/input.test.js](unit/input.test.js) | Typing and clearing partly composed text preserve the password field's focus. Reveal and clear controls work, forbidden shortcuts are blocked, and discarded passwords are cleared without taking focus from another control. |
@@ -24,7 +25,7 @@ The files in `unit/` use controlled examples and test substitutes. Some also run
 | [unit/release.test.js](unit/release.test.js) | Release archives contain the committed source. Signed archives require the correct trusted key, altered archives are rejected, and replacing a release removes obsolete signatures while preserving neighbouring files. |
 | [unit/screenshot.test.js](unit/screenshot.test.js) | Capturing the frozen desktop succeeds, cancels or times out cleanly. A late capture cannot revive a cancelled request or leave temporary resources behind. |
 | [unit/session.test.js](unit/session.test.js) | Input is protected before the screen finishes preparing, and only the correct active screen can claim that protection. Password denial, system-lock handoff, inactivity, display changes and cleanup preserve the intended lock, cursor and media behaviour. |
-| [unit/tooling.test.js](unit/tooling.test.js) | Packaging includes the intended extension files. Installation preserves the previous copy on failure, updates retain edited or deleted starters, and uninstalling keeps settings unless resetting them was requested. |
+| [unit/tooling.test.js](unit/tooling.test.js) | Packaging includes the intended extension files. Local and curl installation preserve the previous copy on failure, and updates retain edited or deleted starters. Curl selects the intended source channel and rejects failed downloads, changed archives and invalid manifests before installation. Local and piped uninstallation keep settings unless resetting them was requested. |
 | [unit/visual-frame.test.js](unit/visual-frame.test.js) | Drawing instructions, text, colours, fonts, blur and clocks stay within the permitted choices and limits. Unsupported or excessively expensive output is refused before it is drawn. |
 
 ## Password, drawing and stylesheet checks

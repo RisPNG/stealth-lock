@@ -2,7 +2,7 @@
 
 The [main README](../README.md) covers installation and everyday use. This guide explains the system's contracts, the saved visual program API, development checks, private native tests and source releases.
 
-The project targets GNOME Shell 45–51. English is the release language, and distribution uses the source installer. The project is licensed under GPL-3.0-only; see [LICENSE](../LICENSE).
+The project targets GNOME Shell 45–51. English is the release language, and distribution uses the source installer, either from a local copy or through curl. The project is licensed under GPL-3.0-only; see [LICENSE](../LICENSE).
 
 ## Requirements
 
@@ -11,13 +11,14 @@ Run development commands through mise. The repository's [mise.toml](../mise.toml
 | Purpose | System requirements |
 | --- | --- |
 | Install and run | Bash 4.3 or later, `gnome-extensions`, GJS 1.78 or later, GTK 4.12 or later, libadwaita 1.4 or later, GLib 2.76 or later with schema tools and introspection bindings, unzip and `/usr/bin/python3` |
+| Install through curl | The runtime requirements above, curl, tar, gzip and `sha256sum` |
 | Visual worker | Bubblewrap 0.8.0 or later at `/usr/bin/bwrap`, JavaScriptCoreGTK 6 at `libjavascriptcoregtk-6.0.so.1`, systemd 254 or later at `/usr/bin/systemd-run` with a running user manager and cgroup v2 memory/swap controllers, and unprivileged user namespaces |
 | Password authentication | Linux PAM and an administrator-approved service in `/etc/pam.d`; the default is `gdm-password` |
 | Source checks and packaging | The runtime requirements, GNOME Shell tools, zip, gettext, OpenSSL, GnuPG and GNOME's pinned GJS CI tools |
 | Native session tests | GNOME Shell, D-Bus, a user systemd manager, IBus with the US engine, and unprivileged user/network namespaces |
 | Container matrix | Docker, with permission to run the isolated systemd containers described below |
 
-The installer validates the visual sandbox before changing settings or replacing installed files. Node and npm are development tools; they are not extension runtime dependencies. Ordinary installation and removal use `bash install.sh` and `bash uninstall.sh` without the development toolchain.
+The installer validates the visual sandbox before changing settings or replacing installed files. Node and npm are development tools; they are not extension runtime dependencies. Both the [curl commands](../README.md#installation-and-update) and local `bash install.sh` / `bash uninstall.sh` work without the development toolchain. `bash install.sh --dev` and `bash install.sh --release` explicitly select the published development or stable source instead of the local copy.
 
 ## Work on the extension
 
@@ -61,7 +62,7 @@ The installer stages the runtime payload, compiles its schema, validates the wor
 | `helpers/` | PAM authentication and the isolated JavaScript interpreter |
 | `styles/` | Shared theme definitions |
 | `schemas/` | GSettings schema |
-| `scripts/` | Source checks and release signing |
+| `scripts/` | Source checks, curl release bundles and publication, and optional release signing |
 | `dev/` | This technical guide and ignored local tool installations |
 | `tests/` | Unit, authentication, visual worker and private native scenarios; see the [test catalogue](../tests/README.md) |
 
@@ -258,7 +259,7 @@ The separate Python authentication suite includes real `pam_unix` and `pam_faill
 
 CI runs source checks and actual GNOME 45–51 runtimes. Source checks use an owned user slice with a 2 GiB memory ceiling, two CPUs and 600 tasks. Each native job uses a digest-pinned image from Fedora's official registry, explicitly installs the runtime and test dependencies, asserts its Shell major and runs as a dedicated nonroot user in an owned systemd container. The container has a 2 GiB memory ceiling and two CPUs; the native fixture retains the stricter aggregate limits above. Older releases use signed RPMs from the official Fedora archive.
 
-Pushes and pull requests containing only Markdown changes, including README edits, skip the automated workflow. A manual run remains available through `workflow_dispatch`.
+Pull requests containing only Markdown changes, including README edits, skip the automated workflow. Pushes run the checks so the development channel can follow every default-branch commit. A manual check run remains available through `workflow_dispatch`.
 
 Each container first runs the existing JavaScriptCore worker and GJS transport suites. Worker failures expose subprocess status and sandbox stderr without disclosing program source or weakening isolation. Pinned Node exports the actual starter entries inside the disposable container.
 
@@ -284,7 +285,19 @@ Use disposable accounts for rejection, expiry and lockout tests. Record the test
 
 ## Source releases
 
-The distribution archive contains committed source. Recipients extract it and run `bash install.sh`; `package.sh` produces the separate slim GNOME runtime archive.
+The distribution archive contains committed source. The curl installer downloads and verifies that archive before using the same packaging and staged installation flow as a local source copy. Recipients can also extract it and run `bash install.sh`; `package.sh` produces the separate slim GNOME runtime archive.
+
+### Automated curl channels
+
+After source checks and the complete native GNOME matrix pass, pushes to the default branch refresh the `latest-build` prerelease. Pushing a tag in the exact form `x.y.z`, or publishing a GitHub release with that tag, builds the stable release. Its tag must match `metadata.json`'s `version-name`; `v` prefixes and prerelease suffixes do not select the stable channel.
+
+Each bundle contains `stealth-lock-<commit>.tar.gz`, `install.sh`, `uninstall.sh`, `build.json` and `SHA256SUMS`. The manifest records the source commit, reference, version and archive checksum. Builds use the exact triggering commit, and a separate publication job has release-write permission. Tagged assets are preserved on retries. The highest published stable version also updates the `latest-release` alias; publishing an older version keeps its own release without downgrading that alias.
+
+The stable curl command retrieves its archive from the original version-tag release. The development command uses a commit-specific archive in `latest-build`. Downloads must match the manifest checksum before unpacking or changing settings. Source archives, staging files and previous copies are removed when installation finishes. Uninstallation needs only the standalone `uninstall.sh`, and retains settings unless `--purge-settings` is supplied.
+
+Automated bundles are unsigned and use HTTPS plus SHA-256 checksums. The optional manual OpenPGP signing process below remains available. Before tagging, complete the [release acceptance](#release-acceptance) checks on actual sessions.
+
+For example, set `version-name` to `1.0.2` in a reviewed commit and publish its `1.0.2` tag. Once its checks pass, rerunning the stable curl command installs that version. A later default-branch push updates only the development channel.
 
 ### Build an archive
 

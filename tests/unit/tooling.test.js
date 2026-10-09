@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import {execFileSync, spawnSync} from 'node:child_process';
+import {createHash} from 'node:crypto';
 import {copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {dirname, join} from 'node:path';
@@ -34,7 +35,7 @@ function createExtensionFixture(t, {realPresets = false} = {}) {
         for (const file of ['shared/presets.js', 'shared/starter-programs.js', 'shared/visual-api.js', 'shared/visual-process.js', 'helpers/visual-renderer.py'])
             copyFileSync(join(project, file), join(source, file));
     }
-    writeFileSync(join(source, 'metadata.json'), JSON.stringify({uuid: 'stealth-lock@user', version: 1, name: 'Stealth Lock test', description: 'Isolated packaging fixture', 'shell-version': ['48'], 'settings-schema': 'org.gnome.shell.extensions.stealth-lock'}));
+    writeFileSync(join(source, 'metadata.json'), JSON.stringify({uuid: 'stealth-lock@user', version: 1, 'version-name': '1.0.1', name: 'Stealth Lock test', description: 'Isolated packaging fixture', 'shell-version': ['48'], 'settings-schema': 'org.gnome.shell.extensions.stealth-lock'}));
     writeFileSync(join(bin, 'gnome-extensions'), '#!/usr/bin/env bash\nif [[ "$1" == pack ]]; then exec /usr/bin/gnome-extensions "$@"; fi\nprintf "%s\\n" "$@" >> "$XDG_DATA_HOME/extension-calls"\n', {mode: 0o755});
     writeFileSync(join(bin, 'gjs'), '#!/usr/bin/env bash\nprintf "%s\\n" "$@" >> "$XDG_DATA_HOME/initializer-calls"\nexec /usr/bin/gjs "$@"\n', {mode: 0o755});
 
@@ -57,6 +58,61 @@ function createExtensionFixture(t, {realPresets = false} = {}) {
 function installedSettings({installed, env}, values = {}) {
     return JSON.parse(execFileSync('/usr/bin/gjs', ['-m', join(project, 'tests/unit/fixtures/installed-settings.js'),
         join(installed, 'schemas'), JSON.stringify(values)], {env, encoding: 'utf8'}));
+}
+
+function publishCurlRelease({source, releases, env}, channel) {
+    const commit = 'a'.repeat(40);
+    const tag = channel === 'latest-release' ? '1.0.1' : '';
+    const directory = join(releases, tag || channel);
+    mkdirSync(directory, {recursive: true});
+    const file = `stealth-lock-${commit}.tar.gz`;
+    const archive = join(directory, file);
+    execFileSync('tar', ['-czf', archive, '-C', dirname(source), 'source'], {env});
+    const bytes = readFileSync(archive);
+    const manifest = {
+        schema: 1, repository: 'RisPNG/stealth-lock', commit,
+        ref: tag ? `refs/tags/${tag}` : 'refs/heads/main', tag, version: '1.0.1',
+        source: {file, sha256: createHash('sha256').update(bytes).digest('hex'), bytes: bytes.length},
+    };
+    mkdirSync(join(releases, channel), {recursive: true});
+    writeFileSync(join(releases, channel, 'build.json'), JSON.stringify(manifest));
+}
+
+function createCurlFixture(t, options) {
+    const fixture = createExtensionFixture(t, options);
+    const releases = join(dirname(fixture.source), 'releases');
+    const working = join(dirname(fixture.source), 'working');
+    const temporary = join(dirname(fixture.source), 'temporary');
+    for (const directory of [releases, working, temporary])
+        mkdirSync(directory);
+    writeFileSync(join(working, 'metadata.json'), JSON.stringify({uuid: 'unrelated-extension@user'}));
+    fixture.env.TMPDIR = temporary;
+    fixture.env.CURL_FIXTURES = releases;
+    writeFileSync(join(fixture.bin, 'curl'), `#!/usr/bin/python3
+import json, os, pathlib, shutil, sys
+
+arguments = sys.argv[1:]
+with pathlib.Path(os.environ["XDG_DATA_HOME"], "curl-calls").open("a") as calls:
+    calls.write(json.dumps(arguments) + "\\n")
+for option in ["--fail", "--silent", "--show-error", "--location"]:
+    assert option in arguments, arguments
+assert arguments[arguments.index("--proto") + 1] == "=https", arguments
+assert "--tlsv1.2" in arguments, arguments
+assert arguments[arguments.index("--max-time") + 1] == "60", arguments
+output = pathlib.Path(arguments[arguments.index("-o") + 1])
+url = next(argument for argument in arguments if argument.startswith("https://"))
+prefix = "https://github.com/RisPNG/stealth-lock/releases/download/"
+assert url.startswith(prefix), url
+source = pathlib.Path(os.environ["CURL_FIXTURES"], url.removeprefix(prefix))
+if not source.is_file():
+    output.write_text("partial failed download")
+    raise SystemExit(22)
+shutil.copyfile(source, output)
+`, {mode: 0o755});
+    const remote = {...fixture, releases, working, temporary};
+    publishCurlRelease(remote, 'latest-build');
+    publishCurlRelease(remote, 'latest-release');
+    return remote;
 }
 
 test('native packaging includes exactly the nonexecutable runtime payload without generated schemas', t => {
@@ -176,6 +232,173 @@ test('installation checks the isolated renderer before initializing the staged s
     assert.ok(arguments_[2].endsWith('/extension'));
     assert.ok(arguments_[5].endsWith('/extension/schemas'));
     assert.ok(existsSync(join(installed, 'shared/presets.js')));
+});
+
+test('piped installation downloads the development release independently of the working directory and preserves settings on update', t => {
+    const fixture = createCurlFixture(t, {realPresets: true});
+    const {source, data, installed, working, temporary, env} = fixture;
+    const script = readFileSync(join(source, 'install.sh'));
+    execFileSync('bash', ['-s', '--'], {input: script, cwd: working, env});
+    const initial = installedSettings(fixture);
+    assert.equal(initial['visual-effect-initialized'], true);
+    assert.equal(JSON.parse(initial['visual-effect-presets']).length, 3);
+    const retained = {
+        'visual-effect-presets': '[]', 'visual-effect-active': '',
+        'normal-prompt-css': 'padding: 7px;', 'freeze-display': false,
+    };
+    installedSettings(fixture, retained);
+    writeFileSync(join(installed, 'obsolete.js'), 'previous build');
+    writeFileSync(join(source, 'extension.js'), 'updated development build');
+    publishCurlRelease(fixture, 'latest-build');
+    execFileSync('bash', ['-s', '--'], {input: script, cwd: working, env});
+
+    assert.equal(readFileSync(join(installed, 'extension.js'), 'utf8'), 'updated development build');
+    assert.equal(existsSync(join(installed, 'obsolete.js')), false);
+    const current = installedSettings(fixture);
+    for (const [key, value] of Object.entries(retained))
+        assert.equal(current[key], value, key);
+    assert.equal(current['visual-effect-initialized'], true);
+    const calls = readFileSync(join(data, 'curl-calls'), 'utf8').trim().split('\n').map(line => JSON.parse(line));
+    assert.deepEqual(calls.map(arguments_ => arguments_.find(argument => argument.startsWith('https://'))), [
+        'https://github.com/RisPNG/stealth-lock/releases/download/latest-build/build.json',
+        `https://github.com/RisPNG/stealth-lock/releases/download/latest-build/stealth-lock-${'a'.repeat(40)}.tar.gz`,
+        'https://github.com/RisPNG/stealth-lock/releases/download/latest-build/build.json',
+        `https://github.com/RisPNG/stealth-lock/releases/download/latest-build/stealth-lock-${'a'.repeat(40)}.tar.gz`,
+    ]);
+    assert.deepEqual(readdirSync(dirname(installed)), ['stealth-lock@user']);
+    assert.deepEqual(readdirSync(temporary), []);
+    assert.equal(existsSync(join(data, 'gnome-shell/extensions/unrelated-extension@user')), false);
+});
+
+test('explicit development and stable channels select their release assets even when a local checkout is available', async t => {
+    for (const [option, channel, archiveTag] of [
+        ['--dev', 'latest-build', 'latest-build'],
+        ['--release', 'latest-release', '1.0.1'],
+    ]) {
+        await t.test(option, t => {
+            const {source, data, installed, temporary, env} = createCurlFixture(t);
+            execFileSync('bash', [join(source, 'install.sh'), option], {cwd: source, env});
+
+            const calls = readFileSync(join(data, 'curl-calls'), 'utf8').trim().split('\n').map(line => JSON.parse(line));
+            assert.deepEqual(calls.map(arguments_ => arguments_.find(argument => argument.startsWith('https://'))), [
+                `https://github.com/RisPNG/stealth-lock/releases/download/${channel}/build.json`,
+                `https://github.com/RisPNG/stealth-lock/releases/download/${archiveTag}/stealth-lock-${'a'.repeat(40)}.tar.gz`,
+            ]);
+            assert.ok(existsSync(join(installed, 'schemas/gschemas.compiled')));
+            assert.deepEqual(readdirSync(dirname(installed)), ['stealth-lock@user']);
+            assert.deepEqual(readdirSync(temporary), []);
+        });
+    }
+});
+
+test('failed curl downloads and invalid release manifests preserve the installation before settings initialization', async t => {
+    for (const [name, changes] of [
+        ['missing manifest', {download: 'manifest'}],
+        ['missing source archive', {download: 'archive'}],
+        ['source checksum mismatch', {download: 'corrupt'}],
+        ['unsupported manifest schema', {manifest: {schema: 2}}],
+        ['different repository', {manifest: {repository: 'other/project'}}],
+        ['invalid source commit', {manifest: {commit: 'a'.repeat(39)}}],
+        ['stable ref in a development manifest', {manifest: {ref: 'refs/tags/1.0.1'}}],
+        ['stable tag in a development manifest', {manifest: {tag: '1.0.1'}}],
+        ['unexpected source filename', {manifest: {source: {file: '../source.tar.gz'}}}],
+        ['invalid checksum format', {manifest: {source: {sha256: 'a'.repeat(63)}}}],
+    ]) {
+        await t.test(name, t => {
+            const fixture = createCurlFixture(t);
+            const {source, data, installed, releases, working, temporary, env} = fixture;
+            mkdirSync(installed, {recursive: true});
+            writeFileSync(join(installed, 'previous.js'), 'previous installation');
+            execFileSync('glib-compile-schemas', ['--strict', join(source, 'schemas')], {env});
+            const before = installedSettings({...fixture, installed: source}, {'freeze-display': false});
+            const manifestPath = join(releases, 'latest-build', 'build.json');
+            const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'));
+            const archive = join(releases, 'latest-build', manifest.source.file);
+            if (changes.download === 'manifest')
+                rmSync(manifestPath);
+            else if (changes.download === 'archive')
+                rmSync(archive);
+            else if (changes.download === 'corrupt') {
+                const bytes = readFileSync(archive);
+                bytes[0] ^= 1;
+                writeFileSync(archive, bytes);
+            } else {
+                writeFileSync(manifestPath, JSON.stringify({
+                    ...manifest, ...changes.manifest,
+                    source: {...manifest.source, ...changes.manifest.source},
+                }));
+            }
+            const result = spawnSync('bash', ['-s', '--'], {
+                input: readFileSync(join(source, 'install.sh')), cwd: working, env, encoding: 'utf8',
+            });
+
+            assert.notEqual(result.status, 0, result.stdout + result.stderr);
+            assert.equal(readFileSync(join(installed, 'previous.js'), 'utf8'), 'previous installation');
+            assert.equal(existsSync(join(data, 'initializer-calls')), false);
+            const after = installedSettings({...fixture, installed: source});
+            assert.deepEqual(after, before);
+            assert.equal(after['visual-effect-initialized'], false);
+            assert.deepEqual(readdirSync(dirname(installed)), ['stealth-lock@user']);
+            assert.deepEqual(readdirSync(temporary), []);
+        });
+    }
+});
+
+test('stable release manifests require valid version tags matching the manifest version', async t => {
+    for (const [name, target, version] of [
+        ['manifest version disagrees with tag', 'manifest', '1.0.2'],
+        ['invalid stable tag', 'tag', 'v1.0.1'],
+    ]) {
+        await t.test(name, t => {
+            const fixture = createCurlFixture(t);
+            const {source, data, installed, releases, working, temporary, env} = fixture;
+            const manifestPath = join(releases, 'latest-release', 'build.json');
+            const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'));
+            if (target === 'tag') {
+                manifest.tag = version;
+                manifest.ref = `refs/tags/${version}`;
+            } else {
+                manifest.version = version;
+            }
+            writeFileSync(manifestPath, JSON.stringify(manifest));
+            const result = spawnSync('bash', ['-s', '--', '--release'], {
+                input: readFileSync(join(source, 'install.sh')), cwd: working, env, encoding: 'utf8',
+            });
+
+            assert.notEqual(result.status, 0, result.stdout + result.stderr);
+            assert.equal(existsSync(installed), false);
+            assert.equal(existsSync(join(data, 'initializer-calls')), false);
+            assert.deepEqual(readdirSync(dirname(installed)), []);
+            assert.deepEqual(readdirSync(temporary), []);
+        });
+    }
+});
+
+test('piped uninstallation retains settings and supports purging them from an unrelated working directory', t => {
+    const fixture = createCurlFixture(t, {realPresets: true});
+    const {source, data, installed, working, temporary, env} = fixture;
+    const install = readFileSync(join(source, 'install.sh'));
+    const uninstall = readFileSync(join(source, 'uninstall.sh'));
+    execFileSync('bash', ['-s', '--', '--release'], {input: install, cwd: working, env});
+    const retained = {'normal-prompt-css': 'padding: 8px;', 'freeze-display': false};
+    installedSettings(fixture, retained);
+    execFileSync('bash', ['-s', '--'], {input: uninstall, cwd: working, env});
+    assert.equal(existsSync(installed), false);
+    execFileSync('bash', ['-s', '--', '--release'], {input: install, cwd: working, env});
+    const afterReinstall = installedSettings(fixture);
+    for (const [key, value] of Object.entries(retained))
+        assert.equal(afterReinstall[key], value, key);
+    execFileSync('bash', ['-s', '--', '--purge-settings'], {input: uninstall, cwd: working, env});
+    assert.equal(existsSync(installed), false);
+    execFileSync('bash', ['-s', '--', '--release'], {input: install, cwd: working, env});
+    const afterPurge = installedSettings(fixture);
+    assert.equal(afterPurge['normal-prompt-css'], '');
+    assert.equal(afterPurge['freeze-display'], true);
+    assert.equal(afterPurge['visual-effect-initialized'], true);
+    assert.equal(JSON.parse(afterPurge['visual-effect-presets']).length, 3);
+    assert.equal(readFileSync(join(data, 'extension-calls'), 'utf8'), 'disable\nstealth-lock@user\ndisable\nstealth-lock@user\n');
+    assert.deepEqual(readdirSync(dirname(installed)), ['stealth-lock@user']);
+    assert.deepEqual(readdirSync(temporary), []);
 });
 
 test('the real installer seeds once and preserves edited and deleted presets through updates and reinstalls', t => {
