@@ -43,6 +43,7 @@ function createPublicationFixture(t, options) {
     const {directory, releases, bundle, bin, commit, env, build} = fixture;
     execFileSync('bash', [build, bundle], {env, stdio: 'pipe'});
     const state = join(directory, 'state.json');
+    writeFileSync(join(bin, 'rg'), '#!/usr/bin/env bash\nexit 127\n', {mode: 0o755});
     writeFileSync(state, JSON.stringify({releases: {}, gitRefs: {}, calls: [], commit, remoteChecks: 0, advanceOnCheck: null}));
     Object.assign(env, {PATH: `${bin}:${env.PATH}`, RELEASE_STATE: state, RELEASE_DIRECTORY: releases});
     writeFileSync(join(bin, 'git'), `#!${process.execPath}

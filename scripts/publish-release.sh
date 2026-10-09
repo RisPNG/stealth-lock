@@ -112,7 +112,7 @@ PY
                 remote_commit=$(git ls-remote "https://github.com/$GITHUB_REPOSITORY.git" "$GITHUB_REF" "${GITHUB_REF}^{}" | tail -n 1 | cut -f 1)
                 [[ "$remote_commit" == "$BUILD_COMMIT" ]] || { echo "The release tag moved during publication; keeping its manifest unpublished" >&2; exit 1; }
             fi
-            if rg --fixed-strings --line-regexp --quiet "$asset" "$staging/existing-assets"; then
+            if grep --fixed-strings --line-regexp --quiet "$asset" "$staging/existing-assets"; then
                 mkdir -p "$staging/existing"
                 gh release download "$tag" --repo "$GITHUB_REPOSITORY" --pattern "$asset" --dir "$staging/existing"
                 cmp --silent "$source_dir/$asset" "$staging/existing/$asset" || { echo "Published $tag asset $asset differs; refusing to replace it" >&2; exit 1; }
