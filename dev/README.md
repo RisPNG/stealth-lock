@@ -11,7 +11,7 @@ Run development commands through mise. The repository's [mise.toml](../mise.toml
 | Purpose | System requirements |
 | --- | --- |
 | Install and run | Bash 4.3 or later, `gnome-extensions`, GJS 1.78 or later, GTK 4.12 or later, libadwaita 1.4 or later, GLib 2.76 or later with schema tools and introspection bindings, unzip and `/usr/bin/python3` |
-| Visual worker | Bubblewrap 0.8.0 or later at `/usr/bin/bwrap`, JavaScriptCoreGTK 6 at `libjavascriptcoregtk-6.0.so.1`, and unprivileged user namespaces |
+| Visual worker | Bubblewrap 0.8.0 or later at `/usr/bin/bwrap`, JavaScriptCoreGTK 6 at `libjavascriptcoregtk-6.0.so.1`, systemd 254 or later at `/usr/bin/systemd-run` with a running user manager and cgroup v2 memory/swap controllers, and unprivileged user namespaces |
 | Password authentication | Linux PAM and an administrator-approved service in `/etc/pam.d`; the default is `gdm-password` |
 | Source checks and packaging | The runtime requirements, GNOME Shell tools, zip, gettext, OpenSSL, GnuPG and GNOME's pinned GJS CI tools |
 | Native session tests | GNOME Shell, D-Bus, a user systemd manager, IBus with the US engine, and unprivileged user/network namespaces |
@@ -194,7 +194,7 @@ ctx.clock({
 
 ### Isolation and resource limits
 
-The worker provides ordinary JavaScript but no GI, Shell, DOM, process, file, network, clipboard, settings, password or lock-control objects. Dynamically constructed functions remain in the same isolated realm. Bubblewrap exposes only read-only runtime libraries and the two interpreter/API files, with private pipes and no host buses, display or home directory. Drawing output follows a strict whitelist. Programs cannot create arbitrary Shell actors or install event handlers.
+The worker provides ordinary JavaScript but no GI, Shell, DOM, process, file, network, clipboard, settings, password or lock-control objects. Dynamically constructed functions remain in the same isolated realm. Each worker enters its own systemd user scope with a kernel-enforced memory ceiling and no swap. It verifies the actual cgroup limits before loading JavaScriptCore or accepting source. Bubblewrap exposes only read-only runtime libraries, the two interpreter/API files and the worker's own memory-limit files, with private pipes and no host buses, display or home directory. Drawing output follows a strict whitelist. Programs cannot create arbitrary Shell actors or install event handlers.
 
 | Limit | Budget |
 | --- | --- |
@@ -203,7 +203,8 @@ The worker provides ordinary JavaScript but no GI, Shell, DOM, process, file, ne
 | Drawing-state depth | 32 |
 | Effective raster work | 16,777,216 pixels per frame across paints, fills, strokes and size-weighted text |
 | Nonrectangular paths | 128 line edges per subpath, 1024 total |
-| Interpreter address space | 512 MiB |
+| Worker memory | 512 MiB of cgroup memory, with no swap |
+| Interpreter address space | 136 GiB of virtual reservation, to accommodate JavaScriptCore's aligned heaps; the memory ceiling still applies |
 | Frame evaluation | 25 ms CPU and 500 ms wall time |
 | Native replay | 50 ms, checked between commands and after replay |
 | Drawing surface | Approximately 4,194,304 pixels, or 16 MiB ARGB, with dimension rounding |
@@ -221,7 +222,7 @@ Run the suite from the project root:
 mise exec -- npm run test:shell
 ```
 
-The runner creates private system and session buses, HOME and XDG directories, and two headless Wayland monitors. It uses a scrubbed environment and software rendering with one Mesa raster worker to reduce CPU contention. Its transient scope limits memory to 1500 MiB, CPU to 150%, tasks to 400 and elapsed time. It does not change the current desktop or its settings.
+The runner creates private system and session buses, HOME and XDG directories, and two headless Wayland monitors. It uses a scrubbed environment and software rendering with one Mesa raster worker to reduce CPU contention. One owned transient slice limits the compositor and its visual workers together to 1500 MiB, 150% CPU and 400 tasks. Its 10 ms CPU quota period reduces refill stalls during the 50 ms drawing deadline. The compositor scope also has an elapsed-time limit. It does not change the current desktop or its settings.
 
 Before launch, the installed `helpers/authentication.py` is replaced and compared with a sentinel-bearing fixture. The same comparison runs before crash recovery starts a fresh compositor. The fixture uses private stdin and controlled exit statuses without PAM. The runner selects the real IBus US engine and waits for both native engine and input-source readiness.
 
@@ -242,10 +243,10 @@ For recovery, the runner waits for the native snapshot, kills only the composito
 | Option | Effect |
 | --- | --- |
 | `SLH_FAKE_GDM=0` | Test unavailable native locking; ScreenShield-dependent scenarios report explicit skips |
-| `SLH_KEEP=1` | Retain private logs after stopping the scope |
+| `SLH_KEEP=1` | Retain private logs after stopping the owned slice |
 | `SLH_NETNS=0` | Explicitly disable network isolation where user namespaces are unavailable |
 
-Otherwise, the runner stops its exact scope and removes temporary files on success or failure. The lower-level `tests/shell/run-shell.sh` provides `start`, `stop`, `status`, `pids`, `clean` and `crash-restart` controls for an owned fixture; its header documents the additional environment options.
+Otherwise, the runner stops its exact slice and all descendant scopes, then removes temporary files on success or failure. Compositor exit also requests slice cleanup so sibling workers cannot outlive the test session. The lower-level `tests/shell/run-shell.sh` provides `start`, `stop`, `status`, `pids`, `clean` and `crash-restart` controls for an owned fixture; its header documents the additional environment options.
 
 The log gate displays warnings as information. Repeated warnings, changed wording and ordinary actor or allocation messages do not fail the suite. Actual error or critical diagnostics, JavaScript error banners and failed assertions still fail unless they are deliberately declared fixture outcomes.
 
@@ -255,7 +256,7 @@ Expected fixture messages must match exact declarations recorded before their sc
 
 The separate Python authentication suite includes real `pam_unix` and `pam_faillock` transactions. Bubblewrap maps the current UID/GID to namespace root and exposes private disposable passwd/shadow files, an administrator-owned `gdm-password` policy and failure tally. It checks correct/wrong passwords, account/password expiry, locked hashes, lockout/reset, missing services/modules and unsafe policy permissions without reaching the host account or policy. It does not validate every distribution's PAM configuration.
 
-CI runs source checks and actual GNOME 45–51 runtimes. Each native job uses a digest-pinned official GNOME Mutter Fedora image, installs that Fedora release's runtime, asserts its Shell major and runs as a dedicated nonroot user in an owned systemd container. The container has a 2 GiB memory ceiling and two CPUs; the compositor retains the stricter limits above. Older releases use signed RPMs from the official Fedora archive.
+CI runs source checks and actual GNOME 45–51 runtimes. Source checks use an owned user slice with a 2 GiB memory ceiling, two CPUs and 600 tasks. Each native job uses a digest-pinned official GNOME Mutter Fedora image, installs that Fedora release's runtime, asserts its Shell major and runs as a dedicated nonroot user in an owned systemd container. The container has a 2 GiB memory ceiling and two CPUs; the native fixture retains the stricter aggregate limits above. Older releases use signed RPMs from the official Fedora archive.
 
 Pushes and pull requests containing only Markdown changes, including README edits, skip the automated workflow. A manual run remains available through `workflow_dispatch`.
 

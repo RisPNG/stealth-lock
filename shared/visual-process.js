@@ -16,21 +16,9 @@ export class VisualProcess {
         });
         launcher.set_environ([]);
         const argv = [
-            '/usr/bin/bwrap', '--clearenv', '--unshare-all', '--unshare-user', '--die-with-parent', '--new-session',
-            '--cap-drop', 'ALL', '--disable-userns', '--ro-bind', '/usr', '/usr',
+            '/usr/bin/python3', '-I', GLib.build_filenamev([path, 'helpers', 'visual-renderer.py']),
+            '--scope', path, String(new Gio.Credentials().get_unix_pid()),
         ];
-        for (const path of ['/lib', '/lib64', '/bin', '/sbin']) {
-            if (GLib.file_test(path, GLib.FileTest.IS_SYMLINK))
-                argv.push('--symlink', GLib.file_read_link(path), path);
-            else if (GLib.file_test(path, GLib.FileTest.IS_DIR))
-                argv.push('--ro-bind', path, path);
-        }
-        argv.push(
-            '--proc', '/proc', '--dev', '/dev', '--size', '4194304', '--tmpfs', '/tmp',
-            '--ro-bind', GLib.build_filenamev([path, 'helpers', 'visual-renderer.py']), '/renderer.py',
-            '--ro-bind', GLib.build_filenamev([path, 'shared', 'visual-api.js']), '/visual-api.js',
-            '--chdir', '/', '--', '/usr/bin/python3', '-I', '/renderer.py', '/visual-api.js',
-        );
         try {
             this.process = launcher.spawnv(argv);
         } finally {

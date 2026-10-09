@@ -34,13 +34,41 @@ jobs:
           sudo apt-get install --yes --no-install-recommends gjs gnome-shell libglib2.0-bin gir1.2-gtk-4.0 gir1.2-adw-1 libjavascriptcoregtk-6.0-1 gettext bubblewrap openssl gnupg zip unzip python3-venv
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
           mise exec -- npm ci
+      - name: Prepare the visual worker's user manager
+        run: |
+          uid=$(id -u)
+          manager="user@$uid.service"
+          if ! systemctl is-active --quiet "$manager"; then
+            sudo systemctl start "$manager"
+            echo "SLH_CI_MANAGER=$manager" >> "$GITHUB_ENV"
+          fi
+          echo "XDG_RUNTIME_DIR=/run/user/$uid" >> "$GITHUB_ENV"
+          echo "SLH_CI_SCOPE=slh-source-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.scope" >> "$GITHUB_ENV"
+          echo "SLH_CI_SLICE=slhsource$GITHUB_RUN_ID$GITHUB_RUN_ATTEMPT.slice" >> "$GITHUB_ENV"
       - name: Install pinned GNOME GJS checks
         run: mise run setup:gjs
       - name: Run all source and isolated authentication checks
-        run: mise exec -- npm run check
+        run: |
+          busctl --user call org.freedesktop.systemd1 /org/freedesktop/systemd1 \
+            org.freedesktop.systemd1.Manager StartTransientUnit 'ssa(sv)a(sa(sv))' \
+            "$SLH_CI_SLICE" fail 4 MemoryMax t 2147483648 \
+            CPUQuotaPerSecUSec t 2000000 TasksMax t 600 CollectMode s inactive-or-failed 0
+          systemd-run --user --scope --quiet --collect --expand-environment=no \
+            --unit="$SLH_CI_SCOPE" --slice="$SLH_CI_SLICE" --property=TasksMax=infinity \
+            mise exec -- npm run check
       - name: Clean development dependencies
         if: always()
-        run: rm -rf node_modules dev/.tools
+        run: |
+          if [[ -n "${SLH_CI_SCOPE:-}" ]]; then
+            systemctl --user stop "$SLH_CI_SCOPE" || true
+          fi
+          if [[ -n "${SLH_CI_SLICE:-}" ]]; then
+            systemctl --user stop "$SLH_CI_SLICE" || true
+          fi
+          if [[ -n "${SLH_CI_MANAGER:-}" ]]; then
+            sudo systemctl stop "$SLH_CI_MANAGER"
+          fi
+          rm -rf node_modules dev/.tools
 
   native:
     needs: checks

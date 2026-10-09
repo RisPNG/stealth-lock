@@ -2,6 +2,7 @@
 
 import ctypes
 import json
+import os
 import pathlib
 import resource
 import signal
@@ -11,6 +12,8 @@ import sys
 MAX_SCRIPT_BYTES = 512 * 1024
 MAX_REQUEST_BYTES = 768 * 1024
 MAX_FRAME_BYTES = 256 * 1024
+MAX_MEMORY_BYTES = 512 * 1024 * 1024
+MAX_ADDRESS_SPACE_BYTES = 136 * 1024 * 1024 * 1024
 REQUEST_DEADLINE_SECONDS = 0.5
 FRAME_CPU_SECONDS = 0.025
 
@@ -123,15 +126,65 @@ if __name__ == "__main__":
     program = None
     try:
         resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
-        resource.setrlimit(resource.RLIMIT_AS, (512 * 1024 * 1024, 512 * 1024 * 1024))
+        resource.setrlimit(resource.RLIMIT_AS, (MAX_ADDRESS_SPACE_BYTES, MAX_ADDRESS_SPACE_BYTES))
         resource.setrlimit(resource.RLIMIT_NOFILE, (32, 32))
         resource.setrlimit(resource.RLIMIT_FSIZE, (0, 0))
         signal.signal(signal.SIGALRM, signal.SIG_DFL)
         signal.signal(signal.SIGPROF, signal.SIG_DFL)
-        if len(sys.argv) != 2:
-            raise ValueError("Visual drawing API path is required")
+        if len(sys.argv) == 4 and sys.argv[1] == "--scope":
+            parent = int(sys.argv[3])
+            if parent <= 0 or os.getppid() != parent:
+                raise RuntimeError("Visual request owner is unavailable")
+            libc = ctypes.CDLL(None, use_errno=True)
+            libc.prctl.argtypes = [ctypes.c_int, ctypes.c_ulong, ctypes.c_ulong, ctypes.c_ulong, ctypes.c_ulong]
+            libc.prctl.restype = ctypes.c_int
+            if libc.prctl(1, signal.SIGKILL, 0, 0, 0) != 0:
+                raise OSError(ctypes.get_errno(), "Visual request owner could not be protected")
+            if os.getppid() != parent:
+                raise RuntimeError("Visual request owner is unavailable")
+            command = [
+                "/usr/bin/systemd-run", "--user", "--scope", "--quiet", "--collect", "--slice-inherit",
+                "--expand-environment=no", "--property=MemoryMax=512M", "--property=MemorySwapMax=0",
+                "--", "/usr/bin/python3", "-I", str(pathlib.Path(__file__).resolve()), "--sandbox", sys.argv[2],
+            ]
+            os.execve(command[0], command, {"XDG_RUNTIME_DIR": "/run/user/" + str(os.getuid())})
+        if len(sys.argv) == 3 and sys.argv[1] == "--sandbox":
+            membership = next((line[3:] for line in pathlib.Path("/proc/self/cgroup").read_text().splitlines()
+                               if line.startswith("0::")), None)
+            if membership is None:
+                raise RuntimeError("Visual programs require the unified memory controller")
+            root = pathlib.Path("/sys/fs/cgroup").resolve()
+            group = (root / membership.lstrip("/")).resolve()
+            group.relative_to(root)
+            if ((group / "memory.max").read_text().strip() != str(MAX_MEMORY_BYTES)
+                    or (group / "memory.swap.max").read_text().strip() != "0"):
+                raise RuntimeError("Visual program memory limits are unavailable")
+            command = [
+                "/usr/bin/bwrap", "--clearenv", "--unshare-all", "--unshare-user", "--die-with-parent",
+                "--new-session", "--cap-drop", "ALL", "--disable-userns", "--ro-bind", "/usr", "/usr",
+            ]
+            for name in ("/lib", "/lib64", "/bin", "/sbin"):
+                path = pathlib.Path(name)
+                if path.is_symlink():
+                    command.extend(["--symlink", str(path.readlink()), name])
+                elif path.is_dir():
+                    command.extend(["--ro-bind", name, name])
+            command.extend([
+                "--proc", "/proc", "--dev", "/dev", "--size", "4194304", "--tmpfs", "/tmp",
+                "--ro-bind", str(pathlib.Path(__file__).resolve()), "/renderer.py",
+                "--ro-bind", str(pathlib.Path(sys.argv[2]) / "shared" / "visual-api.js"), "/visual-api.js",
+                "--ro-bind", str(group / "memory.max"), "/memory.max",
+                "--ro-bind", str(group / "memory.swap.max"), "/memory.swap.max",
+                "--chdir", "/", "--", "/usr/bin/python3", "-I", "/renderer.py", "--render", "/visual-api.js",
+            ])
+            os.execve(command[0], command, {})
+        if len(sys.argv) != 3 or sys.argv[1] != "--render":
+            raise ValueError("Visual renderer launch mode is required")
+        if (pathlib.Path("/memory.max").read_text().strip() != str(MAX_MEMORY_BYTES)
+                or pathlib.Path("/memory.swap.max").read_text().strip() != "0"):
+            raise RuntimeError("Visual program memory limits are unavailable")
         signal.setitimer(signal.ITIMER_REAL, REQUEST_DEADLINE_SECONDS)
-        framework = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
+        framework = pathlib.Path(sys.argv[2]).read_text(encoding="utf-8")
         program = VisualProgram(framework)
         signal.setitimer(signal.ITIMER_REAL, 0)
         initialized = False

@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # Private headless GNOME Shell for end-to-end tests of the Stealth Lock extension.
 #
-#   run-shell.sh start    start the shell in a resource-limited transient scope, wait until ready
-#   run-shell.sh stop     stop that scope (by unit name; never by process name) and clean up
-#   run-shell.sh status   show the scope, its processes, RSS and cgroup memory
-#   run-shell.sh pids     "<pid> <comm>" of every process in the scope
+#   run-shell.sh start    start the shell and inherited workers in one resource-limited slice, wait until ready
+#   run-shell.sh stop     stop that owned slice (by unit name; never by process name) and clean up
+#   run-shell.sh status   show the slice, its descendant processes, RSS and aggregate cgroup memory
+#   run-shell.sh pids     "<pid> <comm>" of every process in the slice
 #   run-shell.sh clean    stop, then remove everything the harness keeps under SLH_ROOT
-#   run-shell.sh crash-restart    SIGKILL only the owned compositor and restart with its private runtime state
+#   run-shell.sh crash-restart    SIGKILL only the owned compositor, stop its slice and restart with private runtime state
 #
 # Environment knobs (all optional):
 #   SLH_ROOT=/tmp/...    where the shell keeps its state: XDG dirs, runtime dir, logs (default /tmp/stealth-lock-shell-<uid>)
@@ -19,7 +19,7 @@
 #   SLH_NETNS=0          do NOT isolate the network (default 1: private user+network namespace, no connectivity)
 #   SLH_MONITOR='WxH [WxH...]'  virtual monitor(s), laid out left to right (default 1280x720)
 #   SLH_KEYFILE_EXTRA=f  file whose content is appended to the keyfile GSettings backend
-#   SLH_MAX_SECONDS=N    hard wall-clock limit of the whole scope (default 600)
+#   SLH_MAX_SECONDS=N    hard wall-clock limit of the test session (default 600)
 #   SLH_PASSWORD=...     password accepted by the stand-in auth helper (default harness-secret)
 #   SLH_SERVICES="a b"   session D-Bus services that may be activated (default: Shell.Extensions, Notifications, CalendarServer)
 # The environment of the shell is scrubbed (env -i): nothing from the user's session leaks in.
@@ -120,12 +120,8 @@ write_confs() {
 
 cmd_start() {
     local unit
-    unit=$(unit_name)
-    if [ -n "$unit" ] && systemctl --user is-active --quiet "$unit" 2>/dev/null; then
-        slh_die "a harness shell is already running ($unit); stop it first"
-    fi
-    if systemctl --user list-units --type=scope --no-legend "$SLH_UNIT_PREFIX-*" 2>/dev/null | grep -q .; then
-        slh_die "another $SLH_UNIT_PREFIX-* scope is active; run 'run-shell.sh stop' or inspect it"
+    if systemctl --user is-active --quiet "$SLH_SLICE"; then
+        slh_die "a harness slice is already running ($SLH_SLICE); stop it first"
     fi
     if [ "${1:-}" = resume ]; then
         check_root
@@ -143,7 +139,8 @@ cmd_start() {
     write_confs
 
     unit=$SLH_UNIT_PREFIX-$(date +%s)-$$.scope
-    printf 'UNIT=%s\nSTARTED=%s\n' "$unit" "$(date +%s)" > "$SLH_STATE"
+    printf 'SLICE=%s\nUNIT=%s\nSTARTED=%s\n' "$SLH_SLICE" "$unit" "$(date +%s)" > "$SLH_STATE"
+    slh_start_resources
 
     # Network isolation: a fresh user+network namespace (uid stays the same, no interfaces except a down lo).
     # Needed because GNOME Shell POSTs the list of per-user extensions to extensions.gnome.org at every start
@@ -152,8 +149,8 @@ cmd_start() {
     if [ "${SLH_NETNS:-1}" = 1 ]; then netns=(unshare --user --map-current-user --net --); fi
 
     # Everything below runs inside the scope; the scrubbed environment is applied by env -i *inside* it.
-    systemd-run --user --scope --quiet --collect --unit="$unit" \
-        -p MemoryMax=1500M -p MemoryHigh=1200M -p CPUQuota=150% -p TasksMax=400 -p TimeoutStopSec=15 -p RuntimeMaxSec=$((SLH_MAX_SECONDS + ${SLH_RUNTIME_SLACK:-30})) \
+    systemd-run --user --scope --quiet --collect --unit="$unit" --slice="$SLH_SLICE" \
+        -p TasksMax=infinity -p TimeoutStopSec=15 -p RuntimeMaxSec=$((SLH_MAX_SECONDS + ${SLH_RUNTIME_SLACK:-30})) \
         -- timeout -k 5 "$SLH_MAX_SECONDS" \
         "${netns[@]}" \
         env -i \
@@ -167,11 +164,11 @@ cmd_start() {
             LIBGL_ALWAYS_SOFTWARE=true LP_NUM_THREADS=1 GBM_ALWAYS_SOFTWARE=true 'VK_LOADER_DRIVERS_SELECT=lvp_*' \
             __EGL_VENDOR_LIBRARY_FILENAMES=/usr/share/glvnd/egl_vendor.d/50_mesa.json __GLX_VENDOR_LIBRARY_NAME=mesa \
             GBM_BACKENDS_PATH="$SLH_ROOT/run/no-gbm-backends" \
-            SLH_ROOT="$SLH_ROOT" SLH_HARNESS_DIR="$SLH_HARNESS_DIR" SLH_PASSWORD="${SLH_PASSWORD:-harness-secret}" \
+            SLH_ROOT="$SLH_ROOT" SLH_HARNESS_DIR="$SLH_HARNESS_DIR" SLH_SLICE="$SLH_SLICE" SLH_PASSWORD="${SLH_PASSWORD:-harness-secret}" \
             SLH_MONITOR="${SLH_MONITOR:-1280x720}" SLH_FAKE_GDM="${SLH_FAKE_GDM:-0}" SLH_X11="${SLH_X11:-0}" SLH_UNSAFE="${SLH_UNSAFE:-0}" \
             bash "$SLH_HARNESS_DIR/scope-main.sh" \
         >> "$SLH_ROOT/logs/scope.log" 2>&1 &
-    echo "started unit $unit (launcher pid $!)"
+    echo "started unit $unit in $SLH_SLICE (launcher pid $!)"
 
     local i
     for i in $(seq 1 120); do
@@ -228,27 +225,20 @@ cmd_status() {
     local unit pid
     unit=$(unit_name)
     [ -n "$unit" ] || { echo "no harness state"; return 0; }
-    if ! systemctl --user is-active --quiet "$unit" 2>/dev/null; then echo "$unit: not active"; return 0; fi
-    echo "$unit: active"
-    systemctl --user show -p MemoryCurrent -p MemoryPeak -p TasksCurrent "$unit"
-    for pid in $(scope_pids "$unit"); do ps -o pid=,rss=,args= -p "$pid" | cut -c1-150; done
+    if ! systemctl --user is-active --quiet "$SLH_SLICE"; then echo "$SLH_SLICE: not active"; return 0; fi
+    echo "$SLH_SLICE: active (compositor $unit)"
+    systemctl --user show -p MemoryCurrent -p MemoryPeak -p TasksCurrent -p ControlGroup "$SLH_SLICE"
+    for pid in $(slh_resource_pids); do ps -o pid=,rss=,args= -p "$pid" | cut -c1-150; done
 }
 
 cmd_stop() {
     local unit
     unit=$(unit_name)
-    if [ -n "$unit" ] && systemctl --user is-active --quiet "$unit" 2>/dev/null; then
-        systemctl --user stop "$unit" || true
-        local i
-        for i in $(seq 1 40); do
-            systemctl --user is-active --quiet "$unit" 2>/dev/null || break
-            sleep 0.5
-        done
-    fi
+    slh_stop_resources
     rm -f "$SLH_STATE" "$SLH_ROOT/run/bus-address"
     # make the 0555 update dir deletable later
     if [ -d "$SLH_ROOT/xdg-data/gnome-shell/extension-updates" ]; then chmod 0755 "$SLH_ROOT/xdg-data/gnome-shell/extension-updates"; fi
-    echo "stopped ${unit:-nothing}"
+    echo "stopped $SLH_SLICE (${unit:-no compositor state})"
 }
 
 cmd_clean() {
@@ -263,7 +253,7 @@ cmd_pids() {
     local unit pid
     unit=$(unit_name)
     [ -n "$unit" ] || return 0
-    for pid in $(scope_pids "$unit"); do printf '%s %s\n' "$pid" "$(cat "/proc/$pid/comm" 2>/dev/null)"; done
+    for pid in $(slh_resource_pids); do printf '%s %s\n' "$pid" "$(cat "/proc/$pid/comm" 2>/dev/null)"; done
 }
 
 case ${1:-} in

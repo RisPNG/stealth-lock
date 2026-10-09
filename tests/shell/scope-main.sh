@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Runs INSIDE the transient systemd scope, with a scrubbed environment (see run-shell.sh).
+# Runs inside the compositor scope in its owned resource slice, with a scrubbed environment (see run-shell.sh).
 # Starts a private (empty) system bus, then a private session bus (dbus-run-session) whose child is the shell.
 set -euo pipefail
 
@@ -8,6 +8,10 @@ gdm_pid=
 cleanup() {
     if [ -n "$gdm_pid" ]; then kill "$gdm_pid" 2>/dev/null || true; fi
     if [ -n "$sysbus_pid" ]; then kill "$sysbus_pid" 2>/dev/null || true; fi
+    env -u DBUS_SESSION_BUS_ADDRESS XDG_RUNTIME_DIR="/run/user/$(id -u)" \
+        systemctl --user show -p MemoryCurrent -p MemoryPeak -p TasksCurrent "$SLH_SLICE" || true
+    env -u DBUS_SESSION_BUS_ADDRESS XDG_RUNTIME_DIR="/run/user/$(id -u)" \
+        systemctl --user --no-block stop "$SLH_SLICE" || true
 }
 trap cleanup EXIT
 

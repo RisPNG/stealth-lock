@@ -81,10 +81,21 @@ docker exec --user 1000 --workdir /project \
         echo "$actual"
         mise trust /project/mise.toml
         mise install
-        unshare --user --map-current-user --net -- bash -eu -c "
-            echo Fixture user and network namespace preflight passed
-            mise exec -- python3 -I -B -m unittest discover -s tests/visual -p test_visual_renderer.py
-            mise exec -- gjs -m tests/visual/process.js
-        "
+        export SLH_ROOT=$(mktemp -d /tmp/stealth-lock-preflight.XXXXXX)
+        . tests/shell/common.sh
+        trap "slh_stop_resources; rm -rf -- \"\$SLH_ROOT\"" EXIT
+        slh_start_resources
+        systemd-run --user --scope --quiet --collect --slice="$SLH_SLICE" \
+            --unit="$SLH_UNIT_PREFIX-preflight.scope" \
+            -p TasksMax=infinity -p TimeoutStopSec=15 -p RuntimeMaxSec=180 \
+            -- timeout -k 5 150 unshare --user --map-current-user --net -- bash -eu -c "
+                echo Fixture user, network namespace and inherited slice preflight passed
+                mise exec -- python3 -I -B -m unittest discover -s tests/visual -p test_visual_renderer.py
+                mise exec -- gjs -m tests/visual/process.js
+            "
+        slh_stop_resources
+        rm -rf -- "$SLH_ROOT"
+        trap - EXIT
+        unset SLH_ROOT
         mise exec -- bash tests/shell/run.sh
     '

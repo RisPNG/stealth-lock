@@ -1,10 +1,10 @@
 import ctypes
 import json
+import os
 import pathlib
 import shutil
 import signal
 import subprocess
-import sys
 import tempfile
 import time
 import unittest
@@ -37,7 +37,7 @@ class VisualRendererTests(unittest.TestCase):
                 request["code"] = code
             requests.append(json.dumps(request, ensure_ascii=False))
         result = subprocess.run(
-            [sys.executable, "-I", str(HELPER), str(API)],
+            ["/usr/bin/python3", "-I", str(HELPER), "--scope", str(ROOT), str(os.getpid())],
             input=("\n".join(requests) + "\n").encode(),
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -113,7 +113,8 @@ cr.text('hello', 10, 20);
     def test_infinite_loop_is_terminated_without_waiting_for_js_to_return(self):
         started = time.monotonic()
         result, frames = self.render("while (true) {}")
-        self.assertIn(result.returncode, (-signal.SIGALRM, -signal.SIGPROF))
+        self.assertIn(result.returncode, (-signal.SIGALRM, -signal.SIGPROF,
+                                         128 + signal.SIGALRM, 128 + signal.SIGPROF))
         self.assertEqual(frames, [])
         self.assertLess(time.monotonic() - started, 2)
 
@@ -166,45 +167,134 @@ ctx.draw.text(ctx.event,0,0);
         self.assertEqual([frame["commands"][0][1] for frame in frames], ["init", "update"])
 
     def test_native_allocation_abuse_hits_the_process_memory_limit(self):
-        result, frames = self.render("const a=[]; while(true) a.push(new Uint8Array(1024*1024));")
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn(frames, ([], [{"error": "Visual program could not be processed"}]))
+        command = ["/usr/bin/python3", "-I", str(HELPER), "--scope", str(ROOT), str(os.getpid())]
+        with subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE) as worker:
+            try:
+                initial = {
+                    "event": "init", "width": 16, "height": 16,
+                    "code": "ctx.state.buffers ??= []; ctx.state.buffers.push(new Uint8Array(8*1024*1024).fill(1)); ctx.draw.paint();",
+                }
+                worker.stdin.write((json.dumps(initial) + "\n").encode())
+                worker.stdin.flush()
+                self.assertEqual(json.loads(worker.stdout.readline())["commands"], [["paint"]])
+                membership = next(line[3:] for line in pathlib.Path(f"/proc/{worker.pid}/cgroup").read_text().splitlines()
+                                  if line.startswith("0::"))
+                group = pathlib.Path("/sys/fs/cgroup") / membership.lstrip("/")
+                self.assertEqual((group / "memory.max").read_text().strip(), str(512 * 1024 * 1024))
+                self.assertEqual((group / "memory.swap.max").read_text().strip(), "0")
+                with (group / "memory.events").open() as events:
+                    completed = 1
+                    for _ in range(100):
+                        try:
+                            worker.stdin.write(b'{"event":"update","width":16,"height":16}\n')
+                            worker.stdin.flush()
+                        except BrokenPipeError:
+                            break
+                        frame = worker.stdout.readline()
+                        if not frame:
+                            break
+                        self.assertEqual(json.loads(frame)["commands"], [["paint"]])
+                        completed += 1
+                    self.assertNotEqual(worker.wait(timeout=3), 0)
+                    counters = dict(line.split() for line in events.read().splitlines())
+                self.assertGreaterEqual(int(counters["oom_kill"]), 1)
+                self.assertLess(completed, 65)
+            finally:
+                if worker.poll() is None:
+                    worker.kill()
+                    worker.wait(timeout=3)
+
+    def test_unprotected_interpreter_and_stale_request_owner_are_rejected(self):
+        for arguments in (
+            ["--render", str(API)],
+            ["--scope", str(ROOT), str(os.getpid() + 1)],
+        ):
+            with self.subTest(arguments=arguments):
+                result = subprocess.run(["/usr/bin/python3", "-I", str(HELPER), *arguments],
+                                        input=b'{"event":"check","code":"return;"}\n',
+                                        stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=3)
+                self.assertEqual(result.returncode, 2)
+                self.assertEqual(json.loads(result.stdout), {"error": "Visual program could not be processed"})
+
+    def test_request_owner_death_terminates_a_pending_scope_registration(self):
+        with tempfile.TemporaryDirectory(prefix="stealth-lock-scope-parent-") as directory:
+            staging = pathlib.Path(directory)
+            manager = staging / "systemd-run"
+            manager.write_text(
+                "#!/usr/bin/python3\nimport os,sys,time\nsys.stdout.write(str(os.getpid())+'\\n')\n"
+                "sys.stdout.flush()\ntime.sleep(10)\n", encoding="utf-8")
+            manager.chmod(0o755)
+            parent = staging / "parent.py"
+            parent.write_text(
+                "import os,subprocess,sys\n"
+                "worker=subprocess.Popen(['/usr/bin/python3','-I','/renderer.py','--scope','/extension',str(os.getpid())],"
+                "stdout=subprocess.PIPE,stderr=subprocess.DEVNULL)\n"
+                "sys.stdout.buffer.write(worker.stdout.readline());sys.stdout.buffer.flush();os._exit(0)\n",
+                encoding="utf-8")
+            command = ["bwrap", "--unshare-user", "--ro-bind", "/usr", "/usr", "--proc", "/proc", "--dev", "/dev"]
+            for name in ("/lib", "/lib64", "/bin", "/sbin"):
+                path = pathlib.Path(name)
+                if path.is_symlink():
+                    command.extend(["--symlink", str(path.readlink()), name])
+                elif path.exists():
+                    command.extend(["--ro-bind", name, name])
+            command.extend([
+                "--ro-bind", str(manager), "/usr/bin/systemd-run", "--ro-bind", str(HELPER), "/renderer.py",
+                "--ro-bind", str(parent), "/parent.py", "--", "/usr/bin/python3", "-I", "/parent.py",
+            ])
+            result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=3)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            pid = int(result.stdout)
+            try:
+                descriptor = os.pidfd_open(pid)
+            except ProcessLookupError:
+                return
+            try:
+                status = pathlib.Path(f"/proc/{pid}/status")
+                for _ in range(100):
+                    if not status.exists() or "State:\tZ" in status.read_text():
+                        break
+                    time.sleep(0.01)
+                else:
+                    self.fail("Visual worker survived its owner during scope registration")
+            finally:
+                try:
+                    signal.pidfd_send_signal(descriptor, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                os.close(descriptor)
 
     def test_production_sandbox_runs_without_home_session_or_network_environment(self):
         self.assertIsNotNone(shutil.which("bwrap"), "bubblewrap is required for visual programs")
-        command = [
-            "bwrap", "--clearenv", "--unshare-all", "--unshare-user", "--die-with-parent",
-            "--new-session", "--cap-drop", "ALL", "--disable-userns", "--ro-bind", "/usr", "/usr",
-        ]
-        for name in ("/lib", "/lib64", "/bin", "/sbin"):
-            path = pathlib.Path(name)
-            if path.is_symlink():
-                command.extend(["--symlink", str(path.readlink()), name])
-            elif path.exists():
-                command.extend(["--ro-bind", name, name])
-        command.extend([
-            "--proc", "/proc", "--dev", "/dev", "--size", "4194304", "--tmpfs", "/tmp",
-            "--ro-bind", str(HELPER), "/renderer.py", "--ro-bind", str(API), "/visual-api.js",
-            "--chdir", "/", "--", "/usr/bin/python3", "-I", "/renderer.py", "/visual-api.js",
-        ])
-        result = subprocess.run(command, input=b'{"event":"check","code":"ctx.draw.paint();"}\n',
-                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=3)
+        result, frames = self.render("ctx.draw.paint();", events=("check",))
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(json.loads(result.stdout), {"valid": True})
+        self.assertEqual(frames, [{"valid": True}])
         with tempfile.TemporaryDirectory(prefix="stealth-lock-visual-secret-") as directory:
             secret = pathlib.Path(directory) / "secret"
             secret.write_text("secret remains outside sandbox", encoding="utf-8")
-            probe = command[:command.index("--")] + ["--", "/usr/bin/python3", "-I", "-c", (
-                "import os,pathlib,socket; "
+            extension = pathlib.Path(directory) / "extension"
+            (extension / "helpers").mkdir(parents=True)
+            (extension / "shared").mkdir()
+            shutil.copyfile(API, extension / "shared" / "visual-api.js")
+            assertion = (
                 "assert not pathlib.Path(" + repr(str(secret)) + ").exists(); "
                 "assert not pathlib.Path('/run/user').exists(); "
                 "assert not pathlib.Path('/home').exists(); "
                 "assert not any(key in os.environ for key in ('DISPLAY','WAYLAND_DISPLAY',"
                 "'DBUS_SESSION_BUS_ADDRESS','SSH_AUTH_SOCK')); "
-                "assert list(pathlib.Path('/sys/class/net').glob('*')) == []"
-            )]
-            isolated = subprocess.run(probe, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=3)
+                "assert list(pathlib.Path('/sys/class/net').glob('*')) == []; "
+                "assert os.statvfs('/memory.max').f_flag & os.ST_RDONLY; "
+                "assert os.statvfs('/memory.swap.max').f_flag & os.ST_RDONLY; "
+                "sys.stdout.write('{\"isolated\":true}\\n'); sys.exit(0)"
+            )
+            source = HELPER.read_text().replace("        program = VisualProgram(framework)", "        " + assertion)
+            self.assertIn(assertion, source)
+            fixture = extension / "helpers" / "visual-renderer.py"
+            fixture.write_text(source, encoding="utf-8")
+            isolated = subprocess.run(["/usr/bin/python3", "-I", str(fixture), "--scope", str(extension), str(os.getpid())],
+                                      stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=3)
             self.assertEqual(isolated.returncode, 0, isolated.stderr)
+            self.assertEqual(json.loads(isolated.stdout), {"isolated": True})
 
     def test_actual_starter_entries_run_in_native_jsc_with_and_without_motion(self):
         source = (
@@ -230,7 +320,7 @@ ctx.draw.text(ctx.event,0,0);
                         if event == "init":
                             request["code"] = preset["code"]
                         requests.append(json.dumps(request))
-                    result = subprocess.run([sys.executable, "-I", str(HELPER), str(API)],
+                    result = subprocess.run(["/usr/bin/python3", "-I", str(HELPER), "--scope", str(ROOT), str(os.getpid())],
                                             input=("\n".join(requests) + "\n").encode(),
                                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=3)
                     self.assertEqual(result.returncode, 0, result.stderr)
