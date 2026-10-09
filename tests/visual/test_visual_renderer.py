@@ -182,22 +182,32 @@ ctx.draw.text(ctx.event,0,0);
                 group = pathlib.Path("/sys/fs/cgroup") / membership.lstrip("/")
                 self.assertEqual((group / "memory.max").read_text().strip(), str(512 * 1024 * 1024))
                 self.assertEqual((group / "memory.swap.max").read_text().strip(), "0")
-                with (group / "memory.events").open() as events:
-                    completed = 1
-                    for _ in range(100):
-                        try:
-                            worker.stdin.write(b'{"event":"update","width":16,"height":16}\n')
-                            worker.stdin.flush()
-                        except BrokenPipeError:
-                            break
-                        frame = worker.stdout.readline()
-                        if not frame:
-                            break
-                        self.assertEqual(json.loads(frame)["commands"], [["paint"]])
-                        completed += 1
-                    self.assertNotEqual(worker.wait(timeout=3), 0)
-                    counters = dict(line.split() for line in events.read().splitlines())
-                self.assertGreaterEqual(int(counters["oom_kill"]), 1)
+                runner_membership = next(line[3:] for line in pathlib.Path("/proc/self/cgroup").read_text().splitlines()
+                                         if line.startswith("0::"))
+                runner_group = pathlib.Path("/sys/fs/cgroup") / runner_membership.lstrip("/")
+                self.assertEqual(group.parent, runner_group.parent)
+                events = group.parent / "memory.events"
+                local_events = group.parent / "memory.events.local"
+                before = dict(line.split() for line in events.read_text().splitlines())
+                local_before = dict(line.split() for line in local_events.read_text().splitlines())
+                completed = 1
+                for _ in range(100):
+                    try:
+                        worker.stdin.write(b'{"event":"update","width":16,"height":16}\n')
+                        worker.stdin.flush()
+                    except BrokenPipeError:
+                        break
+                    frame = worker.stdout.readline()
+                    if not frame:
+                        break
+                    self.assertEqual(json.loads(frame)["commands"], [["paint"]])
+                    completed += 1
+                self.assertNotEqual(worker.wait(timeout=3), 0)
+                after = dict(line.split() for line in events.read_text().splitlines())
+                local_after = dict(line.split() for line in local_events.read_text().splitlines())
+                self.assertGreater(int(after["oom"]), int(before["oom"]))
+                self.assertEqual(int(after["oom_kill"]) - int(before["oom_kill"]), 1)
+                self.assertEqual(local_after["oom"], local_before["oom"])
                 self.assertLess(completed, 65)
             finally:
                 if worker.poll() is None:
