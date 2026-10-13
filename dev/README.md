@@ -72,7 +72,7 @@ The installer stages the runtime payload, compiles its schema, validates the wor
 
 `shell/input.js` owns native password editing and reveal permissions. `shell/overlay.js` borrows its input actor for presentation. `shell/effects/renderer.js` renders validated drawing commands, blur and clocks without access to credentials. `shell/screenshot.js` owns native capture, and `shell/integration.js` handles startup and screen-shield integration.
 
-`shell/authentication.js` owns helper transport and retry timing; `helpers/authentication.py` owns the PAM transaction. `shared/presets.js` owns saved-entry validation and one-time initialisation, while `shared/starter-programs.js` contains the source copied into a new profile. `shared/visual-process.js` owns isolated worker transport, and `shared/visual-frame.js` validates drawing output. `prefs.js` owns the native settings UI and saved-entry editor. Theme colours belong in the central stylesheets.
+`shell/authentication.js` owns helper transport and retry timing; `helpers/authentication.py` owns the PAM transaction. `shared/presets.js` owns saved-entry validation and one-time initialisation, while `shared/starter-programs.js` contains the source copied into a new profile or restored explicitly in Appearance preferences. `shared/visual-process.js` owns isolated worker transport, and `shared/visual-frame.js` validates drawing output. `prefs.js` owns the native settings UI and saved-entry editor. Its settings reset uses schema defaults while preserving saved collections and their initialisation marker. Theme colours belong in the central stylesheets.
 
 ## Authentication and protection
 
@@ -235,7 +235,7 @@ The effects scenarios execute ordinary saved starters through real Bubblewrap-is
 
 Animations are enabled only in the private compositor. Each starter's first frame records wall time, native paint and cold-glyph spans, and available CPU, scheduler and throttling counters. Counter reads and metric logging occur outside the production replay deadline. Drawing calls, assertions and resource limits remain unchanged.
 
-A real `ExtensionPrefsDialog` client exercises GTK bindings, schema bounds, enum and colour controls, saved CSS previews, entry creation/editing/deletion and shortcut capture. It checks Save, Escape and Backspace reset, invalid-JavaScript rejection, ordinary editable starter entries and an empty library that does not reseed.
+A real `ExtensionPrefsDialog` client exercises GTK bindings, schema bounds, enum and colour controls, saved CSS previews, entry creation/editing/deletion and shortcut capture. It checks Save, Escape and Backspace reset, invalid-JavaScript rejection, ordinary editable starter entries and an empty library that does not reseed. Explicit starter restoration preserves saved programs and active selections; confirmed settings restoration removes user overrides, preserves saved collections and refreshes native controls.
 
 For recovery, the runner waits for the native snapshot, kills only the compositor PID in its owned scope with SIGKILL, preserves its private state and settings, then checks recovery and dismissal in a fresh compositor. Immediate assertions use the live runtime record; disk assertions separately wait for asynchronous persistence. This tests extension recovery with an enabled profile, independently of a distribution's display-manager failure policy.
 
@@ -340,9 +340,9 @@ Publish the archive and signature together. Make the public key available and pu
 
 ```sh
 mise exec -- gpg --show-keys --with-fingerprint trusted-maintainer-key.asc
-mise exec -- bash scripts/release.sh --verify trusted-maintainer-key.asc stealth-lock-1.0.1.tar.gz
+mise exec -- bash scripts/release.sh --verify trusted-maintainer-key.asc stealth-lock-1.0.2.tar.gz
 ```
 
-The signature must be beside the archive as `stealth-lock-1.0.1.tar.gz.asc`. Verification uses a temporary keyring without changing the recipient's personal keyring. A changed archive or different signing key fails verification.
+The signature must be beside the archive as `stealth-lock-1.0.2.tar.gz.asc`. Verification uses a temporary keyring without changing the recipient's personal keyring. A changed archive or different signing key fails verification.
 
 For example, changing one byte on a mirror invalidates the signature. A valid signature from a previously untrusted key still requires checking who owns that key.

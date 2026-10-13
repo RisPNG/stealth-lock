@@ -4,8 +4,8 @@
     "uuid": "stealth-lock@user",
     "shell-version": ["45", "46", "47", "48", "49", "50", "51"],
     "session-modes": ["user", "unlock-dialog"],
-    "version": 10,
-    "version-name": "1.0.1",
+    "version": 11,
+    "version-name": "1.0.2",
     "url": "https://github.com/RisPNG/stealth-lock",
     "settings-schema": "org.gnome.shell.extensions.stealth-lock"
 }

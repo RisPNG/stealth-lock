@@ -254,6 +254,91 @@ try {
     const {initializeEffectPresets} = await import(dir.resolve_relative_path('shared/presets.js').get_uri());
     initializeEffectPresets(settings);
     assert(settings.get_string('visual-effect-presets') === '[]', 'Deleted library remains empty when initialized again');
+
+    const restorePresetsRow = findWidget(window, widget => widget instanceof Adw.ActionRow && widget.title === 'Restore Default Presets');
+    assert(restorePresetsRow, 'Preferences provide native default preset restoration');
+    const restorePresets = restorePresetsRow.activatable_widget;
+    assert(restorePresets.grab_focus(), 'Preset restoration accepts native keyboard focus');
+    await waitFor(() => window.get_focus() === restorePresets, 'Preset restoration gains keyboard focus');
+    await injectShortcut(['Return']);
+    assert(JSON.stringify(JSON.parse(settings.get_string('visual-effect-presets'))) === JSON.stringify(starters), 'Restoring an empty library returns the original starter programs');
+    assert(settings.get_string('visual-effect-active') === '' && effectRow.model.get_n_items() === 4 && effectRow.selected === 0,
+        'Restored presets remain inactive and update the native effect choices');
+    await injectShortcut(['Return']);
+    assert(JSON.parse(settings.get_string('visual-effect-presets')).length === starters.length, 'Repeated restoration does not duplicate starter programs');
+
+    const editedStarter = {name: starters[0].name, code: 'ctx.blur(9);'};
+    const customEffect = {name: 'Retained native program', code: 'ctx.blur(3);'};
+    settings.set_string('visual-effect-presets', JSON.stringify([editedStarter, customEffect]));
+    settings.set_string('visual-effect-active', customEffect.name);
+    assert(restorePresets.grab_focus(), 'Preset restoration retains native keyboard focus');
+    await waitFor(() => window.get_focus() === restorePresets, 'Preset restoration gains focus for a populated library');
+    await injectShortcut(['Return']);
+    assert(settings.get_string('visual-effect-active') === customEffect.name && effectRow.model.get_string(effectRow.selected) === customEffect.name,
+        'Restoring presets retains the active custom effect');
+    assert(JSON.stringify(JSON.parse(settings.get_string('visual-effect-presets'))) === JSON.stringify([editedStarter, customEffect, ...starters.slice(1)]),
+        'Restoring presets retains edited and custom programs while adding missing starters');
+
+    const savedKeys = ['visual-effect-presets', 'visual-effect-initialized', 'normal-prompt-css-saved-entries', 'normal-background-css-saved-entries'];
+    for (const key of ['normal-prompt-css', 'normal-background-css']) {
+        settings.set_string(key + '-saved-entries', JSON.stringify([{name: 'Retained native style', code: 'padding: 18px;'}]));
+        settings.set_string(key, 'padding: 18px;');
+    }
+    settings.set_string('authentication-mode', 'system');
+    settings.set_string('pam-service', 'retained-test-service');
+    settings.set_string('cursor-mode', 'hidden');
+    settings.set_string('cursor-bitmap-path', '/retained-test-cursor.png');
+    const resetMonitor = window.get_display().get_monitors().get_item(0);
+    settings.set_string('normal-prompt-monitor', resetMonitor.get_connector() || '0');
+    settings.set_string('normal-prompt-cursor-anchor', 'tl');
+    settings.set_value('cursor-fg-rgba', new GLib.Variant('au', [51, 102, 153, 204]));
+    settings.set_value('cursor-bg-rgba', new GLib.Variant('au', [102, 153, 204, 255]));
+    settings.set_boolean('pause-media', false);
+    settings.set_boolean('debug-abort-use-lock-hotkey', true);
+    settings.set_strv('lock-hotkey', ['<Super><Control>k']);
+    const beforeReset = new Map(settings.settings_schema.list_keys().map(key => [key, settings.get_value(key)]));
+    const restoreSettingsRow = findWidget(window, widget => widget instanceof Adw.ActionRow && widget.title === 'Restore Default Settings');
+    assert(restoreSettingsRow, 'Preferences provide native settings restoration');
+    const restoreSettings = restoreSettingsRow.activatable_widget;
+    assert(restoreSettings.grab_focus(), 'Settings restoration accepts native keyboard focus');
+    await waitFor(() => window.get_focus() === restoreSettings, 'Settings restoration gains keyboard focus');
+    await injectShortcut(['Return']);
+    await waitFor(() => preferences._dialogs.size === 1 && [...preferences._dialogs][0].get_mapped() && [...preferences._dialogs][0].is_active,
+        'Settings restoration opens an active native confirmation');
+    let restoreDialog = [...preferences._dialogs][0];
+    assert(restoreDialog.title === 'Restore Default Settings?' && restoreDialog.get_widget_for_response(Gtk.ResponseType.OK).label === 'Restore Defaults',
+        'Native confirmation describes settings restoration');
+    assert(restoreDialog.get_default_widget() === restoreDialog.get_widget_for_response(Gtk.ResponseType.CANCEL),
+        'Cancelling remains the default native confirmation action');
+    restoreDialog.response(Gtk.ResponseType.CANCEL);
+    await waitFor(() => window.is_active, 'Preferences regain focus after cancelling settings restoration');
+    for (const [key, value] of beforeReset)
+        assert(settings.get_value(key).equal(value), `${key}: cancelling settings restoration preserves its value`);
+
+    assert(restoreSettings.grab_focus(), 'Settings restoration regains native keyboard focus');
+    await waitFor(() => window.get_focus() === restoreSettings, 'Settings restoration regains focus before confirmation');
+    await injectShortcut(['Return']);
+    await waitFor(() => preferences._dialogs.size === 1 && [...preferences._dialogs][0].get_mapped() && [...preferences._dialogs][0].is_active,
+        'Settings restoration reopens its native confirmation');
+    restoreDialog = [...preferences._dialogs][0];
+    restoreDialog.response(Gtk.ResponseType.OK);
+    await waitFor(() => preferences._dialogs.size === 0 && window.is_active, 'Confirmed settings restoration closes and returns native focus');
+    for (const key of settings.settings_schema.list_keys()) {
+        if (savedKeys.includes(key)) {
+            assert(settings.get_value(key).equal(beforeReset.get(key)), `${key}: restoring settings retains saved entries and initialization`);
+        } else {
+            assert(settings.get_value(key).equal(settings.get_default_value(key)), `${key}: restoring settings returns its schema default`);
+            assert(settings.get_user_value(key) === null, `${key}: restoring settings removes its native user override`);
+        }
+    }
+    assert(freeze.active && !debug.active && !follow.active && !follow.sensitive && !anchor.sensitive,
+        'Restoring settings refreshes native switch values and prompt availability');
+    assert(reset.value === 5 && type.selected === 0 && abortLabel.accelerator === settings.get_strv('debug-abort-hotkey')[0],
+        'Restoring settings refreshes native numeric enum and shortcut controls');
+    assert(color.rgba.red === 0 && color.rgba.green === 0 && color.rgba.blue === 0 && color.rgba.alpha === 1,
+        'Restoring settings refreshes native cursor colours');
+    assert(effectRow.model.get_n_items() === starters.length + 2 && effectRow.selected === 0,
+        'Restoring settings turns effects off while retaining restored and custom choices');
     window.close();
     assert(preferences._cancellable.is_cancelled() && preferences._dialogs.size === 0, 'Preferences close releases resources');
     globalThis.print('STEALTH_LOCK_PREFERENCES_OK');

@@ -64,6 +64,10 @@ Freeze Display and Pause Media are **on by default**. To keep a movie playing an
 
 Your first settings profile comes with three optional effects: **Dim and Blur**, **Neo Rain**, and **City Grow** to give you a sense of what Stealth Lock is capable of. They start inactive. Edit, duplicate, or remove them just like entries you add yourself. They are added only once, so reinstalling preserves your collection, even if you have deleted every entry.
 
+To bring back deleted starter effects, choose **Appearance → Restore Default Presets → Restore**. This adds missing starters without changing saved edits, custom programs or the active effect.
+
+Choose **Defaults → Restore Default Settings → Restore** to reset preferences after confirming. Saved effects and CSS entries stay in your collection; effects and custom CSS become inactive.
+
 Changes to effects, CSS, and the prompt position show immediately. Other session choices take effect the next time you activate Stealth Lock.
 
 ## Uninstallation

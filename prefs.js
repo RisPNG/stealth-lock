@@ -5,7 +5,7 @@ import GLib from 'gi://GLib';
 import Gtk from 'gi://Gtk';
 
 import {ExtensionPreferences, gettext as _} from 'resource:///org/gnome/Shell/Extensions/js/extensions/prefs.js';
-import {initializeEffectPresets, readSavedEntries, validateVisualProgramSource} from './shared/presets.js';
+import {DEFAULT_EFFECT_PRESETS, initializeEffectPresets, readSavedEntries, validateVisualProgramSource} from './shared/presets.js';
 import {VisualProcess} from './shared/visual-process.js';
 
 export default class StealthLockPreferences extends ExtensionPreferences {
@@ -24,8 +24,9 @@ export default class StealthLockPreferences extends ExtensionPreferences {
         const cursor = new Adw.PreferencesGroup({title: _('Cursor'), sensitive: settings.get_string('cursor-mode') === 'lock-icon'});
         const styles = new Adw.PreferencesGroup({title: _('Appearance')});
         const debug = new Adw.PreferencesGroup({title: _('Debug'), description: _('Troubleshooting and handoff to the GNOME lock screen')});
+        const defaults = new Adw.PreferencesGroup({title: _('Defaults')});
         const notes = new Adw.PreferencesGroup({title: _('Important Notes')});
-        for (const group of [shortcuts, features, password, cursor, styles, debug, notes])
+        for (const group of [shortcuts, features, password, cursor, styles, debug, defaults, notes])
             page.add(group);
 
         const shortcutLabels = new Map();
@@ -75,8 +76,8 @@ export default class StealthLockPreferences extends ExtensionPreferences {
             ['normal-prompt-cursor-anchor', password, _('Cursor Anchor'), _('Place the prompt at this corner of the pointer'), [_('Bottom Right'), _('Top Right'), _('Top Left'), _('Bottom Left')]],
         ]) {
             const row = new Adw.ComboRow({title, subtitle, model: Gtk.StringList.new(labels), selected: settings.get_enum(key)});
-            row.connect('notify::selected', () => settings.set_enum(key, row.selected));
-            comboRows.set(key, {row});
+            const selectionId = row.connect('notify::selected', () => settings.set_enum(key, row.selected));
+            comboRows.set(key, {row, selectionId});
             group.add(row);
         }
         const pamService = new Adw.EntryRow({title: _('Password PAM Service'),
@@ -128,9 +129,9 @@ export default class StealthLockPreferences extends ExtensionPreferences {
             monitorLabels.push(_('Monitor %s (disconnected)').format(selectedMonitor));
         }
         const monitorRow = new Adw.ComboRow({title: _('Monitor'), subtitle: _('Center the fixed prompt on this monitor'), model: Gtk.StringList.new(monitorLabels), selected: monitorValues.indexOf(selectedMonitor)});
-        monitorRow.connect('notify::selected', () => settings.set_string('normal-prompt-monitor', monitorValues[monitorRow.selected]));
+        const monitorSelectionId = monitorRow.connect('notify::selected', () => settings.set_string('normal-prompt-monitor', monitorValues[monitorRow.selected]));
         password.add(monitorRow);
-        comboRows.set('normal-prompt-monitor', {row: monitorRow, values: monitorValues});
+        comboRows.set('normal-prompt-monitor', {row: monitorRow, selectionId: monitorSelectionId, values: monitorValues});
 
         const bitmap = new Adw.EntryRow({title: _('Cursor Bitmap'), tooltip_text: _('Optional image path or URI; leave blank to use the built-in cursor')});
         settings.bind('cursor-bitmap-path', bitmap, 'text', Gio.SettingsBindFlags.DEFAULT);
@@ -179,7 +180,7 @@ export default class StealthLockPreferences extends ExtensionPreferences {
             const rgba = new Gdk.RGBA({red: bytes[0] / 255, green: bytes[1] / 255, blue: bytes[2] / 255, alpha: bytes[3] / 255});
             const row = new Adw.ActionRow({title, subtitle});
             const button = new Gtk.ColorDialogButton({dialog: new Gtk.ColorDialog({with_alpha: true}), rgba, valign: Gtk.Align.CENTER});
-            button.connect('notify::rgba', () => {
+            const colorId = button.connect('notify::rgba', () => {
                 const value = button.rgba;
                 const components = [value.red, value.green, value.blue, value.alpha].map(component => Math.round(component * 255));
                 settings.set_value(key, new GLib.Variant('au', components));
@@ -187,7 +188,7 @@ export default class StealthLockPreferences extends ExtensionPreferences {
             row.add_suffix(button);
             row.activatable_widget = button;
             cursor.add(row);
-            colorButtons.set(key, button);
+            colorButtons.set(key, {button, colorId});
         }
         for (const [key, title, description] of [
             ['normal-prompt-css', _('Prompt CSS'), _('Inline CSS for the normal password prompt container')],
@@ -201,10 +202,12 @@ export default class StealthLockPreferences extends ExtensionPreferences {
             edit.connect('clicked', () => this._showSavedEntryEditor(window, settings, key, title, description));
         }
         let effectEntries = [];
+        let effectEntriesValid = true;
         try {
             effectEntries = readSavedEntries(settings, 'visual-effect-presets');
         } catch (error) {
             console.error('Stealth Lock: could not read visual effect presets', error);
+            effectEntriesValid = false;
         }
         const effectNames = Gtk.StringList.new([_('None'), ...effectEntries.map(entry => entry.name)]);
         const effectRow = new Adw.ComboRow({
@@ -232,6 +235,17 @@ export default class StealthLockPreferences extends ExtensionPreferences {
             }
             settings.set_string('visual-effect-active', entry?.name ?? '');
         });
+        const restorePresetsRow = new Adw.ActionRow({title: _('Restore Default Presets'), subtitle: _('Add missing starter effects without changing saved programs')});
+        const restorePresets = new Gtk.Button({label: _('Restore'), valign: Gtk.Align.CENTER, sensitive: effectEntriesValid});
+        restorePresetsRow.add_suffix(restorePresets);
+        restorePresetsRow.activatable_widget = restorePresets;
+        styles.add(restorePresetsRow);
+        restorePresets.connect('clicked', () => {
+            const taken = new Set(effectEntries.map(entry => entry.name.trim().toLowerCase()));
+            const missing = DEFAULT_EFFECT_PRESETS.filter(entry => !taken.has(entry.name.toLowerCase()));
+            if (missing.length > 0)
+                settings.set_string('visual-effect-presets', JSON.stringify([...effectEntries, ...missing.map(entry => ({...entry}))]));
+        });
 
         const debugMode = new Adw.SwitchRow({title: _('Enable Debug Mode'), subtitle: _('Enable diagnostic logging and the abort shortcut')});
         const debugInfo = new Adw.SwitchRow({title: _('Show Debug Info'), subtitle: _('Show diagnostic status while the privacy screen is active')});
@@ -246,6 +260,35 @@ export default class StealthLockPreferences extends ExtensionPreferences {
         }
         settings.bind('debug-mode', debugInfo, 'sensitive', Gio.SettingsBindFlags.GET | Gio.SettingsBindFlags.NO_SENSITIVITY);
         settings.bind('debug-mode', useActivation, 'sensitive', Gio.SettingsBindFlags.GET | Gio.SettingsBindFlags.NO_SENSITIVITY);
+        const restoreRow = new Adw.ActionRow({title: _('Restore Default Settings'), subtitle: _('Reset preferences while keeping saved effects and CSS entries')});
+        const restoreSettings = new Gtk.Button({label: _('Restore'), valign: Gtk.Align.CENTER});
+        restoreRow.add_suffix(restoreSettings);
+        restoreRow.activatable_widget = restoreSettings;
+        defaults.add(restoreRow);
+        restoreSettings.connect('clicked', () => {
+            const dialog = new Gtk.Dialog({title: _('Restore Default Settings?'), transient_for: window, modal: true, destroy_with_parent: true, default_width: 440});
+            this._dialogs.add(dialog);
+            dialog.add_button(_('Cancel'), Gtk.ResponseType.CANCEL);
+            dialog.add_button(_('Restore Defaults'), Gtk.ResponseType.OK);
+            dialog.set_default_response(Gtk.ResponseType.CANCEL);
+            const content = dialog.get_content_area();
+            content.set_margin_top(16);
+            content.set_margin_bottom(16);
+            content.set_margin_start(16);
+            content.set_margin_end(16);
+            content.append(new Gtk.Label({label: _('Reset shortcuts, appearance and other preferences to their defaults. Saved effects and CSS entries will be kept.'), wrap: true, xalign: 0}));
+            dialog.connect('response', (_dialog, response) => {
+                if (response === Gtk.ResponseType.OK) {
+                    for (const key of settings.settings_schema.list_keys()) {
+                        if (key !== 'visual-effect-presets' && key !== 'visual-effect-initialized' && !key.endsWith('-saved-entries'))
+                            settings.reset(key);
+                    }
+                }
+                this._dialogs.delete(dialog);
+                dialog.destroy();
+            });
+            dialog.set_visible(true);
+        });
         notes.add(new Adw.ActionRow({
             title: _('Privacy Screen'),
             subtitle: _('This extension blocks normal desktop input while active. Disabling it or restarting GNOME Shell can remove the overlay. Use the GNOME lock screen for session security.'),
@@ -269,10 +312,13 @@ export default class StealthLockPreferences extends ExtensionPreferences {
             if (key === 'visual-effect-presets' || key === 'visual-effect-active') {
                 try {
                     effectEntries = readSavedEntries(settings, 'visual-effect-presets');
+                    effectEntriesValid = true;
                 } catch (error) {
                     console.error('Stealth Lock: could not read visual effect presets', error);
                     effectEntries = [];
+                    effectEntriesValid = false;
                 }
+                restorePresets.sensitive = effectEntriesValid;
                 effectRow.block_signal_handler(effectSelectionId);
                 effectNames.splice(0, effectNames.get_n_items(), [_('None'), ...effectEntries.map(entry => entry.name)]);
                 effectRow.selected = Math.max(0, effectEntries.findIndex(entry => entry.name === settings.get_string('visual-effect-active')) + 1);
@@ -280,6 +326,7 @@ export default class StealthLockPreferences extends ExtensionPreferences {
             }
             const combo = comboRows.get(key);
             if (combo) {
+                combo.row.block_signal_handler(combo.selectionId);
                 if (key === 'normal-prompt-monitor' && !monitorValues.includes(settings.get_string(key))) {
                     const connector = settings.get_string(key);
                     monitorValues.push(connector);
@@ -288,11 +335,14 @@ export default class StealthLockPreferences extends ExtensionPreferences {
                 combo.row.selected = combo.values
                     ? Math.max(0, combo.values.indexOf(settings.get_string(key)))
                     : settings.get_enum(key);
+                combo.row.unblock_signal_handler(combo.selectionId);
             }
             const color = colorButtons.get(key);
             if (color) {
                 const bytes = settings.get_value(key).deep_unpack();
-                color.rgba = new Gdk.RGBA({red: bytes[0] / 255, green: bytes[1] / 255, blue: bytes[2] / 255, alpha: bytes[3] / 255});
+                color.button.block_signal_handler(color.colorId);
+                color.button.rgba = new Gdk.RGBA({red: bytes[0] / 255, green: bytes[1] / 255, blue: bytes[2] / 255, alpha: bytes[3] / 255});
+                color.button.unblock_signal_handler(color.colorId);
             }
             shortcutLabels.get('lock-hotkey').accelerator = settings.get_strv('lock-hotkey')[0] ?? '';
             shortcutLabels.get('debug-abort-hotkey').accelerator = settings.get_strv(useActivation.active ? 'lock-hotkey' : 'debug-abort-hotkey')[0] ?? '';

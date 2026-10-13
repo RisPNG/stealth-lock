@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import {readFile} from 'node:fs/promises';
 import test from 'node:test';
 import {compileFunction} from 'node:vm';
 
@@ -32,6 +33,27 @@ async function preferencesWindow({values = {}, autoResetRange = [0, 3600], monit
         unblock_signal_handler(id) { this.handlers.get(id).blocked = false; }
         add(child) { this.children.push(child); }
         add_suffix(child) { this.children.push(child); }
+        append(child) { this.children.push(child); }
+        get_content_area() {
+            if (!this.content) {
+                this.content = new Widget();
+                this.children.push(this.content);
+            }
+            return this.content;
+        }
+        add_button(label, response) {
+            const button = new Widget({label, response});
+            this.children.push(button);
+            return button;
+        }
+        response(value) { this.emit('response', value); }
+        set_default_response(value) { this.default_response = value; }
+        set_visible(value) { this.visible = value; }
+        set_margin_top() {}
+        set_margin_bottom() {}
+        set_margin_start() {}
+        set_margin_end() {}
+        set_spacing() {}
         set_default_size() {}
         get active() { return this._active ?? false; }
         set active(value) {
@@ -61,6 +83,11 @@ async function preferencesWindow({values = {}, autoResetRange = [0, 3600], monit
                 this.emit('notify::text');
             }
         }
+        get rgba() { return this._rgba; }
+        set rgba(value) {
+            this._rgba = value;
+            this.emit('notify::rgba');
+        }
         destroy() { this.destroyed = true; }
     }
     const enumValues = {
@@ -69,63 +96,59 @@ async function preferencesWindow({values = {}, autoResetRange = [0, 3600], monit
         'lock-type': ['stealth', 'normal'],
         'normal-prompt-cursor-anchor': ['br', 'tr', 'tl', 'bl'],
     };
+    const schema = await readFile(new URL('../../schemas/org.gnome.shell.extensions.stealth-lock.gschema.xml', import.meta.url), 'utf8');
+    const defaults = Object.fromEntries([...schema.matchAll(/<key name="([^"]+)"[^>]*>[\s\S]*?<default>([\s\S]*?)<\/default>/g)].map(([, key, value]) => [key,
+        JSON.parse(value.trim().replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&').replace(/'/g, '"'))]));
     const current = {
+        ...structuredClone(defaults),
         'visual-effect-initialized': true,
-        'visual-effect-presets': '[]',
-        'visual-effect-active': '',
         'lock-hotkey': ['<Super>l'],
-        'debug-mode': false,
         'debug-show-info': false,
-        'debug-abort-use-lock-hotkey': false,
         'debug-abort-hotkey': ['<Control>u'],
-        'freeze-display': true,
-        'pause-media': true,
-        'auto-reset-seconds': 5,
-        'authentication-mode': 'password',
-        'pam-service': 'gdm-password',
-        'retry-base-seconds': 1,
-        'retry-max-seconds': 30,
-        'password-reveal-timeout-seconds': 10,
-        'password-audible-feedback': false,
-        'cursor-mode': 'lock-icon',
-        'lock-type': 'stealth',
-        'normal-prompt-follow-cursor': false,
-        'normal-prompt-cursor-anchor': 'br',
-        'normal-prompt-monitor': '',
-        'normal-prompt-offset-x': 12,
-        'normal-prompt-offset-y': 12,
-        'normal-prompt-fixed-x': -1,
-        'normal-prompt-fixed-y': -1,
-        'cursor-bitmap-path': '',
-        'cursor-fg-rgba': [0, 0, 0, 255],
-        'cursor-bg-rgba': [255, 255, 255, 255],
         ...values,
     };
     const settings = new Widget();
     const bindings = [];
-    settings.settings_schema = {get_key: key => ({get_range: () => ({recursiveUnpack: () => [
+    const writes = [];
+    const resetKeys = [];
+    const userValues = new Map(Object.entries(current));
+    settings.settings_schema = {list_keys: () => Object.keys(defaults), get_key: key => ({get_range: () => ({recursiveUnpack: () => [
         'range', {'auto-reset-seconds': autoResetRange, 'retry-base-seconds': [1, 30],
             'retry-max-seconds': [1, 300], 'password-reveal-timeout-seconds': [0, 300]}[key] ?? [-2147483648, 2147483647],
     ]})})};
     settings.get_string = settings.get_boolean = settings.get_strv = key => current[key];
     settings.get_enum = key => enumValues[key].indexOf(current[key]);
     settings.get_value = key => ({deep_unpack: () => current[key]});
+    settings.get_user_value = key => userValues.has(key) ? {deep_unpack: () => current[key]} : null;
     settings.set_string = settings.set_boolean = settings.set_strv = (key, value) => {
-        if (JSON.stringify(current[key]) !== JSON.stringify(value)) {
+        writes.push([key, value]);
+        if (!userValues.has(key) || JSON.stringify(current[key]) !== JSON.stringify(value)) {
             current[key] = value;
+            userValues.set(key, value);
             settings.emit('changed', key);
         }
     };
     settings.set_enum = (key, value) => settings.set_string(key, enumValues[key][value]);
+    settings.set_value = (key, value) => settings.set_string(key, value.deep_unpack());
+    settings.reset = key => {
+        resetKeys.push(key);
+        userValues.delete(key);
+        current[key] = structuredClone(defaults[key]);
+        settings.emit('changed', key);
+    };
     settings.bind = (key, row, property, flags) => {
         bindings.push({key, row, property, flags});
         row[property] = current[key];
+        const bindingId = flags & 1 ? null : row.connect('notify::' + property, () => settings.set_string(key, row[property]));
         settings.connect('changed', (_settings, changedKey) => {
-            if (changedKey === key)
+            if (changedKey === key) {
+                if (bindingId !== null)
+                    row.block_signal_handler(bindingId);
                 row[property] = current[key];
+                if (bindingId !== null)
+                    row.unblock_signal_handler(bindingId);
+            }
         });
-        if (!(flags & 1))
-            row.connect('notify::' + property, () => settings.set_string(key, row[property]));
     };
     class Names {
         constructor(items) { this.items = items; }
@@ -143,10 +166,14 @@ async function preferencesWindow({values = {}, autoResetRange = [0, 3600], monit
                 get_item: index => ({get_connector: () => monitors[index].connector, get_model: () => monitors[index].model})})})},
         }},
         'gi://Gio': {default: {Cancellable, SettingsBindFlags: {DEFAULT: 0, GET: 1, NO_SENSITIVITY: 4}}},
-        'gi://GLib': {default: {}},
+        'gi://GLib': {default: {Variant: class {
+            constructor(_type, value) { this.value = value; }
+            deep_unpack() { return this.value; }
+        }}},
         'gi://Gtk': {default: {
             ShortcutLabel: Widget, Button: Widget, Adjustment: Widget, ColorDialogButton: Widget,
             ColorDialog: Widget, StringList: {new: items => new Names(items)}, Align: {CENTER: 3},
+            Dialog: Widget, Label: Widget, ResponseType: {CANCEL: -6, OK: -5},
         }},
         './shared/presets.js': Presets,
         './shared/visual-process.js': {VisualProcess: class {}},
@@ -157,7 +184,7 @@ async function preferencesWindow({values = {}, autoResetRange = [0, 3600], monit
     preferences.getSettings = () => settings;
     const window = new Widget();
     preferences.fillPreferencesWindow(window);
-    return {preferences, window, settings, current, bindings, widgets, row: title => widgets.find(widget => widget.title === title)};
+    return {preferences, window, settings, current, defaults, resetKeys, writes, bindings, widgets, row: title => widgets.find(widget => widget.title === title)};
 }
 
 async function editor({key = 'visual-effect-active', library = '[]', active = '', pauseChecks = false} = {}) {
@@ -446,6 +473,190 @@ test('monitor selection stores stable connectors instead of the current display 
     assert.equal(reordered.row('Monitor').selected, 2);
     assert.equal(reordered.current['normal-prompt-monitor'], 'DP-1');
     reordered.window.emit('close-request');
+});
+
+test('restoring an empty effect library adds the default presets and refreshes choices without selecting an effect', async () => {
+    const state = await preferencesWindow();
+    const row = state.row('Restore Default Presets');
+    const restore = row.children.find(widget => widget.label === 'Restore');
+    assert.equal(row.activatable_widget, restore);
+    assert.equal(restore.sensitive, true);
+    const original = structuredClone(state.current);
+    restore.emit('clicked');
+    assert.deepEqual(JSON.parse(state.current['visual-effect-presets']), Presets.DEFAULT_EFFECT_PRESETS);
+    assert.deepEqual(state.current, {...original, 'visual-effect-presets': JSON.stringify(Presets.DEFAULT_EFFECT_PRESETS)});
+    assert.deepEqual([...state.row('Visual Effect').model.items], ['None', ...Presets.DEFAULT_EFFECT_PRESETS.map(entry => entry.name)]);
+    assert.equal(state.row('Visual Effect').selected, 0);
+    assert.equal(state.current['visual-effect-active'], '');
+    assert.deepEqual(state.writes, [['visual-effect-presets', JSON.stringify(Presets.DEFAULT_EFFECT_PRESETS)]]);
+    restore.emit('clicked');
+    assert.equal(state.writes.length, 1, 'restoring an already complete library performs no write');
+    state.window.emit('close-request');
+});
+
+test('restoring default presets retains edited and custom programs and active choice without duplicate names', async () => {
+    const entries = [{name: 'Custom Scene', code: 'ctx.blur(9);'}, {name: ' neo RAIN ', code: 'ctx.blur(4);'}];
+    const state = await preferencesWindow({values: {'visual-effect-presets': JSON.stringify(entries), 'visual-effect-active': ' neo RAIN '}});
+    const restore = state.row('Restore Default Presets').children.find(widget => widget.label === 'Restore');
+    restore.emit('clicked');
+    const restored = [...entries, Presets.DEFAULT_EFFECT_PRESETS[0], Presets.DEFAULT_EFFECT_PRESETS[2]];
+    assert.deepEqual(JSON.parse(state.current['visual-effect-presets']), restored);
+    assert.deepEqual([...state.row('Visual Effect').model.items], ['None', ...restored.map(entry => entry.name)]);
+    assert.equal(state.row('Visual Effect').selected, 2);
+    assert.equal(state.current['visual-effect-active'], ' neo RAIN ');
+    assert.deepEqual(state.writes, [['visual-effect-presets', JSON.stringify(restored)]]);
+    restore.emit('clicked');
+    assert.deepEqual(JSON.parse(state.current['visual-effect-presets']), restored);
+    assert.equal(state.writes.length, 1);
+    state.window.emit('close-request');
+});
+
+test('preset restoration stays disabled for unreadable libraries and responds when the saved library changes', async t => {
+    for (const library of [
+        '{bad JSON',
+        '[{"name":"damaged","code":null}]',
+        '[{"name":"draft","code":"","extra":true}]',
+        '[{"name":"Draft","code":""},{"name":" draft ","code":""}]',
+    ]) {
+        await t.test(library, async () => {
+            const state = await preferencesWindow({values: {'visual-effect-presets': library}});
+            const restore = state.row('Restore Default Presets').children.find(widget => widget.label === 'Restore');
+            assert.equal(restore.sensitive, false);
+            assert.equal(state.current['visual-effect-presets'], library);
+            assert.deepEqual(state.writes, []);
+            state.settings.set_string('visual-effect-presets', '[]');
+            assert.equal(restore.sensitive, true);
+            restore.emit('clicked');
+            assert.deepEqual(JSON.parse(state.current['visual-effect-presets']), Presets.DEFAULT_EFFECT_PRESETS);
+            state.settings.set_string('visual-effect-presets', library);
+            assert.equal(restore.sensitive, false);
+            assert.equal(state.current['visual-effect-presets'], library);
+            state.window.emit('close-request');
+        });
+    }
+});
+
+test('restoring default settings requires confirmation and cancelling preserves every preference', async () => {
+    const state = await preferencesWindow({values: {'lock-type': 'normal', 'freeze-display': false, 'normal-prompt-css': 'padding: 6px;'}});
+    const original = structuredClone(state.current);
+    state.row('Restore Default Settings').children.find(widget => widget.label === 'Restore').emit('clicked');
+    const dialog = [...state.preferences._dialogs][0];
+    assert.equal(dialog.title, 'Restore Default Settings?');
+    assert.equal(dialog.transient_for, state.window);
+    assert.equal(dialog.modal, true);
+    assert.equal(dialog.default_response, -6);
+    assert.deepEqual(state.current, original);
+    dialog.response(-6);
+    assert.deepEqual(state.current, original);
+    assert.deepEqual(state.resetKeys, []);
+    assert.equal(dialog.destroyed, true);
+    assert.equal(state.preferences._dialogs.size, 0);
+    state.window.emit('close-request');
+});
+
+test('confirmed settings restoration resets schema defaults and live controls while keeping saved programs and styles', async () => {
+    const libraries = {
+        'visual-effect-presets': JSON.stringify([{name: 'Custom Scene', code: 'ctx.blur(8);'}]),
+        'visual-effect-initialized': true,
+        'normal-prompt-css-saved-entries': JSON.stringify([{name: 'Compact', code: 'padding: 4px;'}]),
+        'normal-background-css-saved-entries': JSON.stringify([{name: 'Light', code: 'opacity: 0.8;'}]),
+    };
+    const state = await preferencesWindow({values: {
+        ...libraries,
+        'visual-effect-active': 'Custom Scene',
+        'lock-hotkey': ['<Super>k'],
+        'debug-abort-hotkey': ['<Control>i'],
+        'debug-mode': true,
+        'debug-show-info': true,
+        'debug-abort-use-lock-hotkey': true,
+        'freeze-display': false,
+        'pause-media': false,
+        'authentication-mode': 'system',
+        'pam-service': 'system-local-login',
+        'retry-base-seconds': 7,
+        'retry-max-seconds': 100,
+        'password-reveal-timeout-seconds': 0,
+        'password-audible-feedback': true,
+        'auto-reset-seconds': 30,
+        'cursor-mode': 'hidden',
+        'lock-type': 'normal',
+        'normal-prompt-follow-cursor': true,
+        'normal-prompt-cursor-anchor': 'tl',
+        'normal-prompt-monitor': 'DP-9',
+        'normal-prompt-offset-x': 40,
+        'normal-prompt-offset-y': 50,
+        'normal-prompt-fixed-x': 200,
+        'normal-prompt-fixed-y': 300,
+        'cursor-bitmap-path': '/pictures/pointer.png',
+        'cursor-fg-rgba': [10, 20, 30, 128],
+        'cursor-bg-rgba': [40, 50, 60, 64],
+        'normal-prompt-css': 'padding: 6px;',
+        'normal-background-css': 'opacity: 0.5;',
+    }});
+    state.row('Restore Default Settings').children.find(widget => widget.label === 'Restore').emit('clicked');
+    const dialog = [...state.preferences._dialogs][0];
+    dialog.response(-5);
+    assert.deepEqual(state.current, {...state.defaults, ...libraries});
+    assert.deepEqual([...state.resetKeys].sort(), Object.keys(state.defaults).filter(key => !Object.hasOwn(libraries, key)).sort());
+    for (const key of Object.keys(state.defaults)) {
+        if (Object.hasOwn(libraries, key))
+            assert.deepEqual(state.settings.get_user_value(key).deep_unpack(), libraries[key]);
+        else
+            assert.equal(state.settings.get_user_value(key), null, key + ' must remain reset without recreating an override');
+    }
+    for (const title of ['Authentication', 'Lock Type', 'Cursor Anchor', 'Monitor', 'Visual Effect'])
+        assert.equal(state.row(title).selected, 0, title);
+    assert.equal(state.widgets.find(widget => widget.title === 'Cursor' && widget.model).selected, 0);
+    assert.equal(state.row('Cursor').sensitive, true);
+    assert.equal(state.row('Freeze Display').active, true);
+    assert.equal(state.row('Pause Media').active, true);
+    assert.equal(state.row('Password PAM Service').text, 'gdm-password');
+    assert.equal(state.row('Auto Reset (seconds)').value, 5);
+    assert.equal(state.row('Initial Retry Delay').value, 1);
+    assert.equal(state.row('Maximum Retry Delay').value, 30);
+    assert.equal(state.row('Reveal Timeout').value, 10);
+    assert.equal(state.row('Audible Authentication Feedback').active, false);
+    assert.equal(state.row('Cursor Bitmap').text, '');
+    assert.equal(state.row('Activation Hotkey').children[0].accelerator, '<Super><Control>l');
+    assert.equal(state.row('Abort Hotkey (Debug)').children[0].accelerator, '<Control><Alt><Shift>u');
+    assert.deepEqual([...state.row('Visual Effect').model.items], ['None', 'Custom Scene']);
+    for (const [title, expected] of [['Cursor Foreground', [0, 0, 0, 1]], ['Cursor Background', [1, 1, 1, 1]]]) {
+        const rgba = state.row(title).children[0].rgba;
+        assert.deepEqual([rgba.red, rgba.green, rgba.blue, rgba.alpha], expected);
+    }
+    assert.equal(state.row('Show Debug Info').active, true);
+    assert.equal(state.row('Show Debug Info').sensitive, false);
+    for (const title of ['Follow Cursor', 'Cursor Anchor', 'Monitor', 'Cursor Offset X', 'Cursor Offset Y', 'Fixed X', 'Fixed Y', 'Abort Hotkey (Debug)'])
+        assert.equal(state.row(title).sensitive, false, title);
+    assert.equal(dialog.destroyed, true);
+    assert.equal(state.preferences._dialogs.size, 0);
+    state.window.emit('close-request');
+});
+
+test('restoring settings preserves a cleared effect library across reopening preferences', async () => {
+    const state = await preferencesWindow({values: {'visual-effect-presets': '[]', 'visual-effect-initialized': true}});
+    state.row('Restore Default Settings').children.find(widget => widget.label === 'Restore').emit('clicked');
+    [...state.preferences._dialogs][0].response(-5);
+    assert.equal(state.current['visual-effect-presets'], '[]');
+    assert.equal(state.current['visual-effect-initialized'], true);
+    state.window.emit('close-request');
+    const reopened = await preferencesWindow({values: state.current});
+    assert.equal(reopened.current['visual-effect-presets'], '[]');
+    assert.deepEqual([...reopened.row('Visual Effect').model.items], ['None']);
+    reopened.window.emit('close-request');
+});
+
+test('closing preferences destroys an open restore-settings confirmation without resetting anything', async () => {
+    const state = await preferencesWindow({values: {'freeze-display': false}});
+    const original = structuredClone(state.current);
+    state.row('Restore Default Settings').children.find(widget => widget.label === 'Restore').emit('clicked');
+    const dialog = [...state.preferences._dialogs][0];
+    state.window.emit('close-request');
+    assert.equal(dialog.destroyed, true);
+    assert.equal(state.preferences._dialogs.size, 0);
+    assert.equal(state.preferences._cancellable.is_cancelled(), true);
+    assert.deepEqual(state.current, original);
+    assert.deepEqual(state.resetKeys, []);
 });
 
 test('window cancellation kills an in-progress syntax checker and ignores its completion', async () => {
